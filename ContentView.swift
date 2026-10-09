@@ -2218,13 +2218,22 @@ private final class PDFViewerView: PDFView {
         autoScales = false
         scaleFactor = min(maxScaleFactor, max(minScaleFactor, scaleFactor * exp(delta)))
         layoutDocumentView()
+        layoutSubtreeIfNeeded()
         if let page, let pagePoint, let scroll = internalScrollView {
+            scroll.layoutSubtreeIfNeeded()
+            documentView?.layoutSubtreeIfNeeded()
             let clip = scroll.contentView
-            let mapped = convert(pagePoint, from: page)
-            let movement = clip.convert(mapped, from: self) - clip.convert(anchor, from: self)
-            let proposed = CGRect(origin: CGPoint(x: clip.bounds.minX + movement.x, y: clip.bounds.minY + movement.y), size: clip.bounds.size)
-            clip.scroll(to: clip.constrainBoundsRect(proposed).origin)
-            scroll.reflectScrolledClipView(clip)
+            // Older PDFKit releases adjust the clip origin during scale layout.
+            // Recalculate the correction after layout, then once more after scroll.
+            for _ in 0..<2 {
+                let mapped = convert(pagePoint, from: page)
+                let movement = clip.convert(mapped, from: self) - clip.convert(anchor, from: self)
+                if hypot(movement.x, movement.y) < 0.25 { break }
+                let proposed = CGRect(origin: CGPoint(x: clip.bounds.minX + movement.x, y: clip.bounds.minY + movement.y), size: clip.bounds.size)
+                clip.scroll(to: clip.constrainBoundsRect(proposed).origin)
+                scroll.reflectScrolledClipView(clip)
+                layoutSubtreeIfNeeded()
+            }
         }
         refreshOverlay(); onViewportChange?()
     }

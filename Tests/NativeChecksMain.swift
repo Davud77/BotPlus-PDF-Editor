@@ -78,7 +78,11 @@ struct NativeChecks {
         pdf.checkMagnify(0.15, anchor: anchor)
         expect(pdf.scaleFactor > zoomBeforeGesture, "trackpad gesture increases zoom")
         let afterAnchor = pdf.convert(anchorPDFPoint, from: anchorPage)
-        expect(hypot(afterAnchor.x - anchor.x, afterAnchor.y - anchor.y) < 1, "gesture zoom preserves the point under the cursor")
+        let anchorError = hypot(afterAnchor.x - anchor.x, afterAnchor.y - anchor.y)
+        if anchorError >= 1 {
+            FileHandle.standardError.write(Data("Anchor error \(anchorError), before \(anchor), after \(afterAnchor), clip \(clip.bounds), page \(anchorPDFPoint)\n".utf8))
+        }
+        expect(anchorError < 1, "gesture zoom preserves the point under the cursor")
         pdf.checkMagnify(-0.15, anchor: anchor)
         expect(abs(pdf.scaleFactor - zoomBeforeGesture) < 0.001, "reverse trackpad gesture restores zoom")
 
