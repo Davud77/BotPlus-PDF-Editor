@@ -1,0 +1,23 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1024" height="1024" viewBox="0 0 1024 1024">
+  <defs>
+    <linearGradient id="paper" x1=".15" y1="0" x2=".9" y2="1"><stop stop-color="#30363d"/><stop offset="1" stop-color="#1d2228"/></linearGradient>
+    <linearGradient id="badge" x1="0" y1="0" x2="1" y2="1"><stop stop-color="#48515f"/><stop offset="1" stop-color="#292f3b"/></linearGradient>
+    <filter id="shadow" x="-.2" y="-.2" width="1.4" height="1.5"><feGaussianBlur stdDeviation="14"/></filter>
+  </defs>
+  <rect x="14" y="14" width="996" height="996" rx="210" fill="#1b1d22"/>
+  <rect x="196" y="112" width="632" height="800" rx="76" fill="url(#paper)" stroke="#949eae" stroke-opacity=".72" stroke-width="18"/>
+  <path d="M240 112h242a44 44 0 0 1 44 44v68H196v-68a44 44 0 0 1 44-44Z" fill="#ad2933"/>
+  <path d="M264 286h260" stroke="#e0444d" stroke-width="12" stroke-linecap="round"/>
+  <g stroke="#b8c2d1" stroke-opacity=".82" stroke-width="4">
+    <path d="M548 680v48M570 666v62M592 680v48M614 666v62M636 680v48M658 650v78M680 680v48M702 666v62M724 680v48M746 666v62M768 650v78"/>
+  </g>
+  <path d="M548 728h234" stroke="#b8c2d1" stroke-opacity=".72" stroke-width="5"/>
+  <rect x="270" y="368" width="484" height="360" rx="76" fill="#000" opacity=".3" filter="url(#shadow)"/>
+  <rect x="270" y="352" width="484" height="360" rx="76" fill="url(#badge)" stroke="#fff" stroke-opacity=".14" stroke-width="5"/>
+  <g fill="none" stroke="#f0f2f5" stroke-linecap="round" stroke-linejoin="round">
+    <path d="M414 620V444" stroke-width="44"/>
+    <rect x="414" y="444" width="94" height="92" rx="30" stroke-width="36"/>
+    <rect x="414" y="536" width="84" height="84" rx="28" stroke-width="36"/>
+    <path d="M608 542h96M656 494v96" stroke-width="28"/>
+  </g>
+</svg>

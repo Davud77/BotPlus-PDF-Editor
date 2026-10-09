@@ -1,0 +1,80 @@
+// !$*UTF8*$!
+{
+	archiveVersion = 1;
+	classes = {};
+	objectVersion = 56;
+	objects = {
+
+/* Begin PBXBuildFile section */
+		A10000000000000000000001 /* BotPlusPDFEditorApp.swift in Sources */ = {isa = PBXBuildFile; fileRef = B10000000000000000000001 /* BotPlusPDFEditorApp.swift */; };
+		A10000000000000000000002 /* ToolModels.swift in Sources */ = {isa = PBXBuildFile; fileRef = B10000000000000000000002 /* ToolModels.swift */; };
+		A10000000000000000000003 /* MeasurementModels.swift in Sources */ = {isa = PBXBuildFile; fileRef = B10000000000000000000003 /* MeasurementModels.swift */; };
+		A10000000000000000000004 /* MeasurementController.swift in Sources */ = {isa = PBXBuildFile; fileRef = B10000000000000000000004 /* MeasurementController.swift */; };
+		A10000000000000000000005 /* MeasurementRepository.swift in Sources */ = {isa = PBXBuildFile; fileRef = B10000000000000000000005 /* MeasurementRepository.swift */; };
+		A10000000000000000000006 /* PDFCanvas.swift in Sources */ = {isa = PBXBuildFile; fileRef = B10000000000000000000006 /* PDFCanvas.swift */; };
+		A10000000000000000000007 /* PDFWorkspaceModel.swift in Sources */ = {isa = PBXBuildFile; fileRef = B10000000000000000000007 /* PDFWorkspaceModel.swift */; };
+		A10000000000000000000008 /* RibbonView.swift in Sources */ = {isa = PBXBuildFile; fileRef = B10000000000000000000008 /* RibbonView.swift */; };
+		A10000000000000000000009 /* WorkspaceView.swift in Sources */ = {isa = PBXBuildFile; fileRef = B10000000000000000000009 /* WorkspaceView.swift */; };
+		A1000000000000000000000A /* SidebarViews.swift in Sources */ = {isa = PBXBuildFile; fileRef = B1000000000000000000000A /* SidebarViews.swift */; };
+		A1000000000000000000000B /* StatusBarView.swift in Sources */ = {isa = PBXBuildFile; fileRef = B1000000000000000000000B /* StatusBarView.swift */; };
+		A1000000000000000000000C /* ContentView.swift in Sources */ = {isa = PBXBuildFile; fileRef = B1000000000000000000000D /* ContentView.swift */; };
+		A1000000000000000000000D /* Assets.xcassets in Resources */ = {isa = PBXBuildFile; fileRef = B1000000000000000000000E /* Assets.xcassets */; };
+/* End PBXBuildFile section */
+
+/* Begin PBXFileReference section */
+		B10000000000000000000001 /* BotPlusPDFEditorApp.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = BotPlusPDFEditorApp.swift; sourceTree = "<group>"; };
+		B10000000000000000000002 /* ToolModels.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ToolModels.swift; sourceTree = "<group>"; };
+		B10000000000000000000003 /* MeasurementModels.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = MeasurementModels.swift; sourceTree = "<group>"; };
+		B10000000000000000000004 /* MeasurementController.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = MeasurementController.swift; sourceTree = "<group>"; };
+		B10000000000000000000005 /* MeasurementRepository.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = MeasurementRepository.swift; sourceTree = "<group>"; };
+		B10000000000000000000006 /* PDFCanvas.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = PDFCanvas.swift; sourceTree = "<group>"; };
+		B10000000000000000000007 /* PDFWorkspaceModel.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = PDFWorkspaceModel.swift; sourceTree = "<group>"; };
+		B10000000000000000000008 /* RibbonView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = RibbonView.swift; sourceTree = "<group>"; };
+		B10000000000000000000009 /* WorkspaceView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = WorkspaceView.swift; sourceTree = "<group>"; };
+		B1000000000000000000000A /* SidebarViews.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SidebarViews.swift; sourceTree = "<group>"; };
+		B1000000000000000000000B /* StatusBarView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = StatusBarView.swift; sourceTree = "<group>"; };
+		B1000000000000000000000C /* BotPlusPDFEditor.app */ = {isa = PBXFileReference; explicitFileType = wrapper.application; includeInIndex = 0; path = BotPlusPDFEditor.app; sourceTree = BUILT_PRODUCTS_DIR; };
+		B1000000000000000000000D /* ContentView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ContentView.swift; sourceTree = "<group>"; };
+		B1000000000000000000000E /* Assets.xcassets */ = {isa = PBXFileReference; lastKnownFileType = folder.assetcatalog; path = Assets.xcassets; sourceTree = "<group>"; };
+/* End PBXFileReference section */
+
+/* Begin PBXGroup section */
+		C10000000000000000000001 = {isa = PBXGroup; children = (B1000000000000000000000D /* ContentView.swift */, C10000000000000000000002 /* BotPlusPDFEditor source files */, C10000000000000000000003 /* Products */,); sourceTree = "<group>"; };
+		C10000000000000000000002 /* BotPlusPDFEditor source files */ = {isa = PBXGroup; path = BotPlusPDFEditor; sourceTree = "<group>"; children = (C10000000000000000000004 /* App */, C10000000000000000000005 /* Domain */, C10000000000000000000006 /* Application */, C10000000000000000000007 /* Infrastructure */, C10000000000000000000008 /* Presentation */,); };
+		C10000000000000000000003 /* Products */ = {isa = PBXGroup; name = Products; children = (B1000000000000000000000C /* BotPlusPDFEditor.app */,); sourceTree = "<group>"; };
+		C10000000000000000000004 /* App */ = {isa = PBXGroup; path = App; sourceTree = "<group>"; children = (B10000000000000000000001 /* BotPlusPDFEditorApp.swift */,); };
+		C10000000000000000000005 /* Domain */ = {isa = PBXGroup; path = Domain; sourceTree = "<group>"; children = (B10000000000000000000002 /* ToolModels.swift */, B10000000000000000000003 /* MeasurementModels.swift */,); };
+		C10000000000000000000006 /* Application */ = {isa = PBXGroup; path = Application; sourceTree = "<group>"; children = (B10000000000000000000004 /* MeasurementController.swift */,); };
+		C10000000000000000000007 /* Infrastructure */ = {isa = PBXGroup; path = Infrastructure; sourceTree = "<group>"; children = (B10000000000000000000005 /* MeasurementRepository.swift */, B10000000000000000000006 /* PDFCanvas.swift */,); };
+		C10000000000000000000008 /* Presentation */ = {isa = PBXGroup; path = Presentation; sourceTree = "<group>"; children = (B10000000000000000000007 /* PDFWorkspaceModel.swift */, B10000000000000000000008 /* RibbonView.swift */, B10000000000000000000009 /* WorkspaceView.swift */, B1000000000000000000000A /* SidebarViews.swift */, B1000000000000000000000B /* StatusBarView.swift */,); };
+/* End PBXGroup section */
+
+/* Begin PBXNativeTarget section */
+		D10000000000000000000001 /* BotPlusPDFEditor */ = {isa = PBXNativeTarget; buildConfigurationList = E10000000000000000000002; buildPhases = (F10000000000000000000001 /* Sources */, F10000000000000000000002 /* Frameworks */, F10000000000000000000003 /* Resources */,); buildRules = (); dependencies = (); name = BotPlusPDFEditor; productName = BotPlusPDFEditor; productReference = B1000000000000000000000C /* BotPlusPDFEditor.app */; productType = "com.apple.product-type.application"; };
+/* End PBXNativeTarget section */
+
+/* Begin PBXProject section */
+		D10000000000000000000002 /* Project object */ = {isa = PBXProject; attributes = {BuildIndependentTargetsInParallel = 1; LastSwiftUpdateCheck = 1600; LastUpgradeCheck = 1600; TargetAttributes = {D10000000000000000000001 = {CreatedOnToolsVersion = 16.0; }; }; }; buildConfigurationList = E10000000000000000000001; compatibilityVersion = "Xcode 14.0"; developmentRegion = en; hasScannedForEncodings = 0; knownRegions = (en, Base,); mainGroup = C10000000000000000000001; productRefGroup = C10000000000000000000003 /* Products */; projectDirPath = ""; projectRoot = ""; targets = (D10000000000000000000001 /* BotPlusPDFEditor */,); };
+/* End PBXProject section */
+
+/* Begin PBXBuildFile section (frameworks) */
+/* End PBXBuildFile section */
+
+/* Begin PBXFrameworksBuildPhase section */
+		F10000000000000000000001 /* Sources */ = {isa = PBXSourcesBuildPhase; buildActionMask = 2147483647; files = (A1000000000000000000000C /* ContentView.swift in Sources */,); runOnlyForDeploymentPostprocessing = 0; };
+		F10000000000000000000002 /* Frameworks */ = {isa = PBXFrameworksBuildPhase; buildActionMask = 2147483647; files = (); runOnlyForDeploymentPostprocessing = 0; };
+		F10000000000000000000003 /* Resources */ = {isa = PBXResourcesBuildPhase; buildActionMask = 2147483647; files = (A1000000000000000000000D /* Assets.xcassets in Resources */,); runOnlyForDeploymentPostprocessing = 0; };
+/* End PBXFrameworksBuildPhase section */
+
+/* Begin XCBuildConfiguration section */
+		E10000000000000000000001 /* Project config list */ = {isa = XCConfigurationList; buildConfigurations = (E10000000000000000000003, E10000000000000000000004,); defaultConfigurationIsVisible = 0; defaultConfigurationName = Release; };
+		E10000000000000000000002 /* Target config list */ = {isa = XCConfigurationList; buildConfigurations = (E10000000000000000000005, E10000000000000000000006,); defaultConfigurationIsVisible = 0; defaultConfigurationName = Release; };
+		E10000000000000000000003 /* Debug project */ = {isa = XCBuildConfiguration; buildSettings = {CLANG_ENABLE_MODULES = YES; SDKROOT = macosx; SWIFT_VERSION = 6.0; }; name = Debug; };
+		E10000000000000000000004 /* Release project */ = {isa = XCBuildConfiguration; buildSettings = {CLANG_ENABLE_MODULES = YES; SDKROOT = macosx; SWIFT_VERSION = 6.0; }; name = Release; };
+		E10000000000000000000005 /* Debug target */ = {isa = XCBuildConfiguration; buildSettings = {CODE_SIGN_ENTITLEMENTS = BotPlusPDFEditor/BotPlusPDFEditor.entitlements; ARCHS = arm64; ONLY_ACTIVE_ARCH = YES; CODE_SIGN_STYLE = Automatic; ENABLE_APP_SANDBOX = YES; GENERATE_INFOPLIST_FILE = YES; ASSETCATALOG_COMPILER_APPICON_NAME = AppIcon; INFOPLIST_KEY_CFBundleDisplayName = "BotPlus PDF Editor"; MARKETING_VERSION = 1.0.0; CURRENT_PROJECT_VERSION = 1; INFOPLIST_KEY_NSHumanReadableCopyright = "Copyright © 2026 BotPlus. All rights reserved."; INFOPLIST_KEY_LSApplicationCategoryType = "public.app-category.productivity"; INFOPLIST_KEY_NSHighResolutionCapable = YES; MACOSX_DEPLOYMENT_TARGET = 14.0; PRODUCT_BUNDLE_IDENTIFIER = com.botplus.pdfeditor; PRODUCT_NAME = "$(TARGET_NAME)"; SWIFT_EMIT_LOC_STRINGS = YES; SWIFT_VERSION = 6.0; }; name = Debug; };
+		E10000000000000000000006 /* Release target */ = {isa = XCBuildConfiguration; buildSettings = {CODE_SIGN_ENTITLEMENTS = BotPlusPDFEditor/BotPlusPDFEditor.entitlements; ARCHS = arm64; ONLY_ACTIVE_ARCH = YES; CODE_SIGN_STYLE = Automatic; ENABLE_APP_SANDBOX = YES; GENERATE_INFOPLIST_FILE = YES; ASSETCATALOG_COMPILER_APPICON_NAME = AppIcon; INFOPLIST_KEY_CFBundleDisplayName = "BotPlus PDF Editor"; MARKETING_VERSION = 1.0.0; CURRENT_PROJECT_VERSION = 1; INFOPLIST_KEY_NSHumanReadableCopyright = "Copyright © 2026 BotPlus. All rights reserved."; INFOPLIST_KEY_LSApplicationCategoryType = "public.app-category.productivity"; MACOSX_DEPLOYMENT_TARGET = 14.0; PRODUCT_BUNDLE_IDENTIFIER = com.botplus.pdfeditor; PRODUCT_NAME = "$(TARGET_NAME)"; SWIFT_EMIT_LOC_STRINGS = YES; SWIFT_VERSION = 6.0; }; name = Release; };
+/* End XCBuildConfiguration section */
+
+	};
+	rootObject = D10000000000000000000002 /* Project object */;
+}
