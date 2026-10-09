@@ -550,16 +550,19 @@ private enum AnnotationMetadata {
         var record = records.object(forKey: annotation)?.record ?? Record(opacity: Double(annotation.color.alphaComponent))
         record.group = group; records.setObject(Box(record), forKey: annotation)
     }
-    static func isContainer(_ annotation: PDFAnnotation) -> Bool {
+    private static func isOpacityContainer(_ annotation: PDFAnnotation) -> Bool {
         ["Text", "FreeText", "Popup"].contains(annotation.type ?? "") && (annotation.contents ?? "").hasPrefix(prefix)
+    }
+    static func isContainer(_ annotation: PDFAnnotation) -> Bool {
+        isOpacityContainer(annotation) || (!annotation.shouldDisplay && !annotation.shouldPrint && PDFSourceSession.isLayoutMetadata(annotation.contents ?? ""))
     }
     // PDFKit's writer omits custom dictionary keys. A hidden, non-printing FreeText
     // annotation carries editor settings while standard visible annotations stay editable.
     static func prepareForSave(_ document: PDFDocument) {
         for index in 0..<document.pageCount {
             guard let page = document.page(at: index) else { continue }
-            for annotation in page.annotations where isContainer(annotation) { removeContainer(annotation, from: page) }
-            let entries = page.annotations.enumerated().compactMap { index, annotation -> Entry? in
+            for annotation in page.annotations where isOpacityContainer(annotation) { removeContainer(annotation, from: page) }
+            let entries = page.annotations.filter { !isContainer($0) }.enumerated().compactMap { index, annotation -> Entry? in
                 guard let record = records.object(forKey: annotation)?.record else { return nil }
                 return Entry(index: index, subtype: annotation.type ?? "", center: CGPoint(x: annotation.bounds.midX, y: annotation.bounds.midY), record: record)
             }
@@ -579,14 +582,14 @@ private enum AnnotationMetadata {
     static func removeContainers(_ document: PDFDocument) {
         for index in 0..<document.pageCount {
             guard let page = document.page(at: index) else { continue }
-            for annotation in page.annotations where isContainer(annotation) { removeContainer(annotation, from: page) }
+            for annotation in page.annotations where isOpacityContainer(annotation) { removeContainer(annotation, from: page) }
         }
     }
     static func restore(_ document: PDFDocument) {
         for index in 0..<document.pageCount {
             guard let page = document.page(at: index) else { continue }
             let annotations = page.annotations.filter { !isContainer($0) }
-            let containers = page.annotations.filter(isContainer)
+            let containers = page.annotations.filter(isOpacityContainer)
             var used = Set<Int>()
             for marker in containers where marker.type != "Popup" {
                 guard let contents = marker.contents,
@@ -624,8 +627,8 @@ private enum AnnotationMetadata {
     }
     static func copy(from source: PDFPage, to destination: PDFPage) {
         let old = source.annotations.filter { !isContainer($0) }
-        for marker in destination.annotations where isContainer(marker) { removeContainer(marker, from: destination) }
-        transfer(from: old, to: destination.annotations)
+        for marker in destination.annotations where isOpacityContainer(marker) { removeContainer(marker, from: destination) }
+        transfer(from: old, to: destination.annotations.filter { !isContainer($0) })
     }
 
 }

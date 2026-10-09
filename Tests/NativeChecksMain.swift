@@ -269,7 +269,7 @@ private func runPDFiumChecks(root: URL) throws {
     let pdf = PDFDocument(data: edited)!
     expect(pdf.page(at: 0)!.string?.contains(replacement) == true, "replacement is searchable PDF page text")
     expect(pdf.page(at: 0)!.string?.contains(original) != true, "old original text is removed, not covered by an annotation")
-    expect(pdf.page(at: 0)!.annotations.isEmpty, "source editing does not create a free-text annotation")
+    expect(pdf.page(at: 0)!.annotations.filter { $0.shouldDisplay || $0.shouldPrint }.isEmpty, "source editing creates no visible or printable overlay annotation")
     let path = root.appendingPathComponent("edited-content.pdf")
     expect(pdf.write(to: path), "modified content saves")
     let reopenedText = PDFDocument(url: path)?.page(at: 0)?.string ?? ""

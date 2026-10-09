@@ -90,7 +90,59 @@ final class PDFSourceSession {
         let block: BlockInfo?
     }
     private struct EmbeddedFont { let handle: FPDF_FONT; let codes: [UInt32: UInt32] }
-    private struct Glyph { let unicode: UInt32; let origin: CGPoint }
+    private struct Glyph: Codable { let unicode: UInt32; let origin: CGPoint }
+    private struct LayoutRecord: Codable {
+        let id: String
+        let text: String
+        let width: CGFloat
+        let glyphs: [Glyph]
+    }
+    private struct GlyphKey: Hashable { let unicode: UInt32; let x: Int; let y: Int }
+    private struct LayoutIndex {
+        let records: [LayoutRecord]
+        let points: [String: [GlyphKey: [CGPoint]]]
+        let candidates: [GlyphKey: Set<String>]
+        static func key(_ glyph: Glyph) -> GlyphKey { GlyphKey(unicode: glyph.unicode,x: Int(floor(glyph.origin.x*4)),y: Int(floor(glyph.origin.y*4))) }
+        static func matches(_ glyph: Glyph,in table: [GlyphKey:[CGPoint]]) -> Bool {
+            let key = key(glyph)
+            for x in (key.x-1)...(key.x+1) {
+                for y in (key.y-1)...(key.y+1) {
+                    if table[GlyphKey(unicode: key.unicode,x: x,y: y)]?.contains(where: { hypot($0.x-glyph.origin.x,$0.y-glyph.origin.y) < 0.2 }) == true { return true }
+                }
+            }
+            return false
+        }
+        init(records: [LayoutRecord], readings: [UInt:[Glyph]]) {
+            var live: [GlyphKey:[CGPoint]] = [:]
+            for glyph in readings.values.joined() { live[Self.key(glyph),default: []].append(glyph.origin) }
+            var accepted: [LayoutRecord] = [], points: [String:[GlyphKey:[CGPoint]]] = [:], candidates: [GlyphKey:Set<String>] = [:]
+            for record in records where !record.glyphs.isEmpty && record.width.isFinite && record.width >= 10 && record.width <= 20000 {
+                guard record.glyphs.count <= 2_000_000, record.glyphs.allSatisfy({ $0.origin.x.isFinite && $0.origin.y.isFinite && abs($0.origin.x) <= 1_000_000_000 && abs($0.origin.y) <= 1_000_000_000 && Self.matches($0,in: live) }) else { continue }
+                accepted.append(record)
+                for glyph in record.glyphs {
+                    let key = Self.key(glyph)
+                    points[record.id,default: [:]][key,default: []].append(glyph.origin)
+                    candidates[key,default: []].insert(record.id)
+                }
+            }
+            self.records = accepted; self.points = points; self.candidates = candidates
+        }
+        func block(for glyphs: [Glyph]) -> BlockInfo? {
+            let visible = glyphs.filter { $0.unicode > 32 && UnicodeScalar($0.unicode).map({ !Character(String($0)).isWhitespace }) == true }
+            guard let first = visible.first else { return nil }
+            let key = Self.key(first); var ids = Set<String>()
+            for x in (key.x-1)...(key.x+1) {
+                for y in (key.y-1)...(key.y+1) { ids.formUnion(candidates[GlyphKey(unicode: key.unicode,x: x,y: y)] ?? []) }
+            }
+            for id in ids {
+                guard let table = points[id], visible.allSatisfy({ Self.matches($0,in: table) }), let record = records.first(where: { $0.id == id }) else { continue }
+                return BlockInfo(id: id,text: record.text,width: record.width)
+            }
+            return nil
+        }
+    }
+    private static let layoutPrefix = "BotPlus source text blocks v1:"
+    static func isLayoutMetadata(_ contents: String) -> Bool { contents.hasPrefix(layoutPrefix) }
     private struct Positioned {
         let fragment: Fragment
         let box: CGRect
@@ -118,10 +170,11 @@ final class PDFSourceSession {
         let handle = try PDFiumDocumentHandle(data: data, pageIndex: pageIndex)
         guard let textPage = handle.textPage else { throw PDFSourceError.textNotFound }
         let readings = indexedText(textPage)
+        let layoutIndex = LayoutIndex(records: readLayouts(handle.page),readings: readings)
         var all: [Fragment] = []
         for index in 0..<max(0,Int(FPDFPage_CountObjects(handle.page))) {
             if let object = FPDFPage_GetObject(handle.page,Int32(index)) {
-                collect(object,parent: nil,parentMatrix: identity,rootIndex: index,depth: 0,textPage: textPage,readings: readings,into: &all)
+                collect(object,parent: nil,parentMatrix: identity,rootIndex: index,depth: 0,textPage: textPage,readings: readings,layouts: layoutIndex,into: &all)
             }
         }
         guard let seed = all.reversed().first(where: { $0.bounds.insetBy(dx: -3,dy: -3).contains(point) }) else { throw PDFSourceError.textNotFound }
@@ -278,6 +331,10 @@ final class PDFSourceSession {
             attributed.addAttributes([NSAttributedString.Key(kCTFontAttributeName as String): style.font,NSAttributedString.Key(kCTForegroundColorAttributeName as String): style.color.cgColor,NSAttributedString.Key(kCTLigatureAttributeName as String): 0],range: NSRange(location: offset,length: units.count))
             offset += units.count
         }
+        let originalReadings = handle.textPage.map(Self.indexedText) ?? [:]
+        var layoutRecords = LayoutIndex(records: Self.readLayouts(handle.page),readings: originalReadings).records
+        let replacedIDs = Set(fragments.compactMap { $0.block?.id })
+        layoutRecords.removeAll { replacedIDs.contains($0.id) }
         handle.closeTextPage()
         var loadedFonts: [URL: EmbeddedFont] = [:]
         func load(_ url: URL) throws -> EmbeddedFont {
@@ -408,22 +465,26 @@ final class PDFSourceSession {
         if let check = FPDFText_LoadPage(handle.page) {
             defer { FPDFText_ClosePage(check) }
             let actual = objects.compactMap { try? Self.text(of: $0,in: check) }.joined()
+            let index = Self.indexedText(check)
+            let glyphs = objects.flatMap { index[UInt(bitPattern: $0)] ?? [] }.filter { $0.unicode > 32 && UnicodeScalar($0.unicode).map({ !Character(String($0)).isWhitespace }) == true }
+            if !glyphs.isEmpty { layoutRecords.append(LayoutRecord(id: blockName,text: normalized,width: blockWidth,glyphs: glyphs)) }
             let expected = normalized.filter { !$0.isWhitespace }
             guard actual.filter({ !$0.isWhitespace }) == expected else { throw PDFSourceError.content }
         } else if !objects.isEmpty { throw PDFSourceError.content }
+        try Self.writeLayouts(layoutRecords,page: handle.page)
         var length = 0
         guard let bytes = BotPlusPDFium_SaveDocument(handle.document,&length), length > 0 else { throw PDFSourceError.save }
         defer { BotPlusPDFium_Free(bytes) }
         return Data(bytes: bytes,count: length)
     }
 
-    private static func collect(_ object: FPDF_PAGEOBJECT, parent: FPDF_PAGEOBJECT?, parentMatrix: FS_MATRIX, rootIndex: Int, depth: Int, textPage: FPDF_TEXTPAGE, readings: [UInt: [Glyph]]? = nil, into result: inout [Fragment]) {
+    private static func collect(_ object: FPDF_PAGEOBJECT, parent: FPDF_PAGEOBJECT?, parentMatrix: FS_MATRIX, rootIndex: Int, depth: Int, textPage: FPDF_TEXTPAGE, readings: [UInt: [Glyph]]? = nil, layouts: LayoutIndex? = nil, into result: inout [Fragment]) {
         guard depth < 32 else { return }
         if FPDFPageObj_GetType(object) == FPDF_PAGEOBJ_FORM {
             var local = identity
             guard FPDFPageObj_GetMatrix(object,&local) != 0 else { return }
             for index in 0..<max(0,Int(FPDFFormObj_CountObjects(object))) {
-                if let child = FPDFFormObj_GetObject(object,UInt(index)) { collect(child,parent: object,parentMatrix: multiply(parentMatrix,local),rootIndex: rootIndex,depth: depth+1,textPage: textPage,readings: readings,into: &result) }
+                if let child = FPDFFormObj_GetObject(object,UInt(index)) { collect(child,parent: object,parentMatrix: multiply(parentMatrix,local),rootIndex: rootIndex,depth: depth+1,textPage: textPage,readings: readings,layouts: layouts,into: &result) }
             }
             return
         }
@@ -445,8 +506,47 @@ final class PDFSourceSession {
         var r: UInt32 = 0, g: UInt32 = 0, b: UInt32 = 0, a: UInt32 = 255
         _ = FPDFPageObj_GetFillColor(object,&r,&g,&b,&a)
         let color = NSColor(calibratedRed: CGFloat(r)/255,green: CGFloat(g)/255,blue: CGFloat(b)/255,alpha: CGFloat(a)/255)
-        result.append(Fragment(object: object,parent: parent,rootIndex: rootIndex,matrix: effective,bounds: transformed(rect,by: parentMatrix),text: text,style: Style(url: url,size: max(1,physicalSize),color: color),block: blockInfo(object)))
+        result.append(Fragment(object: object,parent: parent,rootIndex: rootIndex,matrix: effective,bounds: transformed(rect,by: parentMatrix),text: text,style: Style(url: url,size: max(1,physicalSize),color: color),block: blockInfo(object) ?? layouts?.block(for: readings?[UInt(bitPattern: object)] ?? [])))
     }
+    private static func annotationContents(_ annotation: FPDF_ANNOTATION) -> String? {
+        let length = FPDFAnnot_GetStringValue(annotation,"Contents",nil,0)
+        guard length >= 2 && length < 32_000_000 else { return nil }
+        var units = [UInt16](repeating: 0,count: Int(length/2))
+        _ = units.withUnsafeMutableBufferPointer { FPDFAnnot_GetStringValue(annotation,"Contents",$0.baseAddress,length) }
+        return String(decoding: units.prefix { $0 != 0 },as: UTF16.self)
+    }
+    private static func readLayouts(_ page: FPDF_PAGE) -> [LayoutRecord] {
+        for index in 0..<max(0,FPDFPage_GetAnnotCount(page)) {
+            guard let annotation = FPDFPage_GetAnnot(page,index) else { continue }
+            defer { FPDFPage_CloseAnnot(annotation) }
+            guard let contents = annotationContents(annotation), contents.hasPrefix(layoutPrefix),
+                  let data = Data(base64Encoded: String(contents.dropFirst(layoutPrefix.count))),
+                  let records = try? JSONDecoder().decode([LayoutRecord].self,from: data) else { continue }
+            return records
+        }
+        return []
+    }
+    private static func writeLayouts(_ records: [LayoutRecord], page: FPDF_PAGE) throws {
+        let count = max(0,FPDFPage_GetAnnotCount(page))
+        if count > 0 {
+            for index in (0..<count).reversed() {
+                guard let annotation = FPDFPage_GetAnnot(page,index) else { continue }
+                let metadata = annotationContents(annotation).map(isLayoutMetadata) ?? false
+                FPDFPage_CloseAnnot(annotation)
+                if metadata && FPDFPage_RemoveAnnot(page,index) == 0 { throw PDFSourceError.content }
+            }
+        }
+        guard !records.isEmpty else { return }
+        let body = layoutPrefix+(try JSONEncoder().encode(records)).base64EncodedString()
+        let units = Array(body.utf16)+[0]
+        guard let annotation = FPDFPage_CreateAnnot(page,FPDF_ANNOT_FREETEXT) else { throw PDFSourceError.content }
+        defer { FPDFPage_CloseAnnot(annotation) }
+        var rect = FS_RECTF(left: 0,top: 1,right: 1,bottom: 0)
+        guard units.withUnsafeBufferPointer({ FPDFAnnot_SetStringValue(annotation,"Contents",$0.baseAddress) }) != 0,
+              FPDFAnnot_SetFlags(annotation,FPDF_ANNOT_FLAG_HIDDEN | FPDF_ANNOT_FLAG_NOVIEW) != 0,
+              FPDFAnnot_SetRect(annotation,&rect) != 0 else { throw PDFSourceError.content }
+    }
+
     private static func blockInfo(_ object: FPDF_PAGEOBJECT) -> BlockInfo? {
         for index in 0..<max(0,FPDFPageObj_CountMarks(object)) {
             guard let mark = FPDFPageObj_GetMark(object,UInt(index)) else { continue }
@@ -475,7 +575,7 @@ final class PDFSourceSession {
             guard let object = FPDFText_GetTextObject(page,index), FPDFText_IsGenerated(page,index) != 1 else { continue }
             let unicode = FPDFText_GetUnicode(page,index)
             var x: Double = 0, y: Double = 0
-            guard unicode != 0, FPDFText_GetCharOrigin(page,index,&x,&y) != 0 else { continue }
+            guard unicode != 0, FPDFText_GetCharOrigin(page,index,&x,&y) != 0, x.isFinite, y.isFinite, abs(x) <= 1_000_000_000, abs(y) <= 1_000_000_000 else { continue }
             result[UInt(bitPattern: object),default: []].append(Glyph(unicode: unicode,origin: CGPoint(x: x,y: y)))
         }
         return result
