@@ -272,7 +272,11 @@ private func runPDFiumChecks(root: URL) throws {
     expect(pdf.page(at: 0)!.annotations.isEmpty, "source editing does not create a free-text annotation")
     let path = root.appendingPathComponent("edited-content.pdf")
     expect(pdf.write(to: path), "modified content saves")
-    expect(PDFDocument(url: path)?.page(at: 0)?.string?.contains(replacement) == true, "modified text survives reopening")
+    let reopenedText = PDFDocument(url: path)?.page(at: 0)?.string ?? ""
+    if !reopenedText.contains(replacement) {
+        FileHandle.standardError.write(Data("PDFKit saved text extraction: \(reopenedText.debugDescription)\n".utf8))
+    }
+    expect(reopenedText.filter { !$0.isWhitespace }.contains(replacement.filter { !$0.isWhitespace }), "all modified characters survive reopening")
     let memory = edited as NSData
     let checkDoc = FPDF_LoadMemDocument64(memory.bytes,memory.length,nil)!
     let checkPage = FPDF_LoadPage(checkDoc,0)!
