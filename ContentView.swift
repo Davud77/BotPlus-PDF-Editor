@@ -2229,8 +2229,20 @@ private final class PDFViewerView: PDFView {
                 let mapped = convert(pagePoint, from: page)
                 let movement = clip.convert(mapped, from: self) - clip.convert(anchor, from: self)
                 if hypot(movement.x, movement.y) < 0.25 { break }
-                let proposed = CGRect(origin: CGPoint(x: clip.bounds.minX + movement.x, y: clip.bounds.minY + movement.y), size: clip.bounds.size)
-                clip.scroll(to: clip.constrainBoundsRect(proposed).origin)
+                var origin = CGPoint(x: clip.bounds.minX + movement.x, y: clip.bounds.minY + movement.y)
+                if let document = scroll.documentView {
+                    let content = document.frame
+                    if content.width > clip.bounds.width {
+                        origin.x = min(max(content.minX, origin.x), content.maxX - clip.bounds.width)
+                    } else { origin.x = clip.bounds.minX }
+                    if content.height > clip.bounds.height {
+                        origin.y = min(max(content.minY, origin.y), content.maxY - clip.bounds.height)
+                    } else { origin.y = clip.bounds.minY }
+                }
+                // scroll(to:) quantizes to clip-space points on macOS 15. With
+                // magnified bounds that causes a visible screen-space drift.
+                clip.setBoundsOrigin(origin)
+                clip.needsDisplay = true
                 scroll.reflectScrolledClipView(clip)
                 layoutSubtreeIfNeeded()
             }
