@@ -121,10 +121,11 @@ else
 fi
 if git rev-parse --verify HEAD >/dev/null 2>&1; then git branch -M main; else git symbolic-ref HEAD refs/heads/main; fi
 if git remote get-url origin >/dev/null 2>&1; then
-  [[ "$(git remote get-url origin)" == "$REPOSITORY_URL" ]] || {
-    printf 'Origin points to a different repository. Expected %s\n' "$REPOSITORY_URL" >&2
-    exit 1
-  }
+  CURRENT_ORIGIN="$(git remote get-url origin)"
+  case "${CURRENT_ORIGIN%/}" in
+    "$REPOSITORY_URL"|"${REPOSITORY_URL%.git}"|git@github.com:Davud77/BotPlus-PDF-Editor.git|ssh://git@github.com/Davud77/BotPlus-PDF-Editor.git) ;;
+    *) printf 'Origin points to a different repository. Expected %s\n' "$REPOSITORY_URL" >&2; exit 1 ;;
+  esac
 else
   git remote add origin "$REPOSITORY_URL"
 fi

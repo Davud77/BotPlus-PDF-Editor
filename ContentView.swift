@@ -820,7 +820,7 @@ private struct RibbonView: View {
                         Button { manager.tab = tab } label: {
                             Text(manager.text(tab.title)).font(.system(size: 12, weight: manager.tab == tab ? .semibold : .regular))
                                 .foregroundStyle(tab == .file ? Color.white : Palette.text)
-                                .padding(.horizontal, tab == .file ? 14 : 10).frame(height: 33)
+                                .lineLimit(1).frame(width: tabWidth(tab), height: 33)
                                 .background(tab == .file ? Palette.file : (manager.tab == tab ? Palette.selected : .clear))
                                 .overlay(alignment: .bottom) { if manager.tab == tab && tab != .file { Palette.accent.frame(height: 2) } }
                         }.buttonStyle(.plain).help(manager.text(tab.title))
@@ -835,6 +835,12 @@ private struct RibbonView: View {
             }.frame(height: 91)
             Palette.separator.frame(height: 1)
         }.background(Palette.ribbon)
+    }
+
+    private func tabWidth(_ tab: RibbonTab) -> CGFloat {
+        let font = NSFont.systemFont(ofSize: 12, weight: .semibold)
+        let width = (manager.text(tab.title) as NSString).size(withAttributes: [.font: font]).width
+        return max(50, ceil(width) + (tab == .file ? 28 : 20))
     }
 
     private func groups(for tab: RibbonTab) -> [RibbonGroupSpec] {
@@ -1985,6 +1991,8 @@ private final class PDFViewerView: PDFView {
     private var transform: Transform?
     private var panPoint: CGPoint?
     private var cursorPushed = false
+    private var requestedScrollOrigin: CGPoint?
+    private var lastScrollOrigin: CGPoint?
     private var eventMonitor: Any?
     private var tracking: NSTrackingArea?
     private let overlay = AnnotationOverlayView(frame: .zero)
@@ -2017,6 +2025,8 @@ private final class PDFViewerView: PDFView {
                             self.applyMagnification(event.magnification, at: local); handled = true
                         } else if event.modifierFlags.contains(.command) || event.modifierFlags.contains(.control) {
                             self.applyMagnification(-event.scrollingDeltaY * 0.01, at: local); handled = true
+                        } else {
+                            self.applyScroll(event); handled = true
                         }
                     }
                 }
@@ -2211,7 +2221,38 @@ private final class PDFViewerView: PDFView {
         else { selectAnnotation(annotation) }
         setNeedsDisplay(bounds)
     }
+    private func applyScroll(_ event: NSEvent) {
+        guard let scroll = internalScrollView else { return }
+        let clip = scroll.contentView
+        let factorX = event.hasPreciseScrollingDeltas ? 1 : max(10, scroll.horizontalLineScroll)
+        let factorY = event.hasPreciseScrollingDeltas ? 1 : max(10, scroll.verticalLineScroll)
+        let deltaInView = CGPoint(x: -event.scrollingDeltaX * factorX,
+                                  y: (isFlipped ? -1 : 1) * event.scrollingDeltaY * factorY)
+        let delta = clip.convert(deltaInView, from: self) - clip.convert(.zero, from: self)
+        if lastScrollOrigin != clip.bounds.origin || event.phase.contains(.began) {
+            requestedScrollOrigin = clip.bounds.origin
+        }
+        let previous = requestedScrollOrigin ?? clip.bounds.origin
+        var proposed = CGPoint(x: previous.x + delta.x, y: previous.y + delta.y)
+        if let document = scroll.documentView {
+            let content = document.frame
+            if content.width > clip.bounds.width {
+                proposed.x = min(max(content.minX, proposed.x), content.maxX - clip.bounds.width)
+            } else { proposed.x = clip.bounds.minX }
+            if content.height > clip.bounds.height {
+                proposed.y = min(max(content.minY, proposed.y), content.maxY - clip.bounds.height)
+            } else { proposed.y = clip.bounds.minY }
+        }
+        // Keep sub-point deltas between events when AppKit aligns clip origins.
+        requestedScrollOrigin = proposed
+        clip.setBoundsOrigin(proposed)
+        lastScrollOrigin = clip.bounds.origin
+        clip.needsDisplay = true
+        scroll.reflectScrolledClipView(clip)
+        refreshOverlay(); onViewportChange?()
+    }
     private func applyMagnification(_ delta: CGFloat, at anchor: CGPoint) {
+        requestedScrollOrigin = nil; lastScrollOrigin = nil
         guard delta.isFinite, delta != 0 else { return }
         let page = page(for: anchor, nearest: true)
         let pagePoint = page.map { convert(anchor, to: $0) }
@@ -2239,8 +2280,8 @@ private final class PDFViewerView: PDFView {
                         origin.y = min(max(content.minY, origin.y), content.maxY - clip.bounds.height)
                     } else { origin.y = clip.bounds.minY }
                 }
-                // scroll(to:) quantizes to clip-space points on macOS 15. With
-                // magnified bounds that causes a visible screen-space drift.
+                // Retain fractional coordinates where supported. Older AppKit
+                // releases may align the resulting origin to clip-space pixels.
                 clip.setBoundsOrigin(origin)
                 clip.needsDisplay = true
                 scroll.reflectScrolledClipView(clip)
@@ -2253,8 +2294,7 @@ private final class PDFViewerView: PDFView {
         if event.modifierFlags.contains(.command) || event.modifierFlags.contains(.control) {
             applyMagnification(-event.scrollingDeltaY * 0.01, at: convert(event.locationInWindow, from: nil))
         } else {
-            if let scroll = internalScrollView { scroll.scrollWheel(with: event) } else { super.scrollWheel(with: event) }
-            onViewportChange?()
+            if internalScrollView != nil { applyScroll(event) } else { super.scrollWheel(with: event) }
         }
     }
     override func magnify(with event: NSEvent) {

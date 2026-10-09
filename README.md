@@ -5,7 +5,7 @@
 [![Dependencies](https://img.shields.io/badge/external%20dependencies-zero-success)](#technology)
 [![Apple Silicon](https://img.shields.io/badge/Apple%20Silicon-native-777777?logo=apple)](https://developer.apple.com/)
 
-A native macOS PDF workspace built with SwiftUI, AppKit, and Apple PDFKit. Its ribbon ergonomics, dockable panels, and drafting-oriented workflows take inspiration from PDF-XChange Editor, with a bilingual Russian and English interface.
+A native macOS PDF workspace built with SwiftUI, AppKit, and Apple PDFKit. Its ribbon ergonomics, dockable panels, and drafting-oriented workflows take inspiration from PDF-XChange Editor, with a bilingual Russian and English interface. Ribbon tab widths remain fixed when the active tab changes.
 
 ## Features
 
@@ -62,7 +62,7 @@ The app defines no AppIntents types or shortcut declarations. Xcode may still in
 
 ## Workspace and editing
 
-Enable **View → Rulers** and choose pt/mm/in from the ruler corner or status bar. Pinch on the trackpad to zoom around the cursor; Command/Control-scroll also zooms. Coordinates are relative to the crop box: X increases to the right and Y increases upward in page space. Page rotation changes which PDF axis is shown by each ruler; ticks remain aligned with the displayed PDF.
+Enable **View → Rulers** and choose pt/mm/in from the ruler corner or status bar. Two-finger scrolling pans the document with every tool. Pinch on the trackpad to zoom around the cursor; Command/Control-scroll also zooms. Coordinates are relative to the crop box: X increases to the right and Y increases upward in page space. Page rotation changes which PDF axis is shown by each ruler; ticks remain aligned with the displayed PDF.
 
 Use the side-strip icons to open or collapse a drawer. The side strip selects the active panel; no duplicate bottom tabs are shown. The header arrows move a panel directly left or right. Detach opens an NSPanel; its native close button re-docks it. The panel header X hides the panel. Resize with the divider; widths are also constrained by the space available for the document viewport.
 

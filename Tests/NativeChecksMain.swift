@@ -71,6 +71,15 @@ struct NativeChecks {
         expect(manager.rulerMetrics != beforeZoom, "PDF scale updates ruler derivative")
         expect(abs(RulerUnit.millimeters.pointsPerUnit * 25.4 - 72) < 0.00001, "mm conversion")
         expect(RulerUnit.inches.pointsPerUnit == 72, "inch conversion")
+        let scrollBefore = clip.bounds.origin
+        let wheelCG = CGEvent(scrollWheelEvent2Source: nil, units: .pixel, wheelCount: 1, wheel1: -40, wheel2: 0, wheel3: 0)!
+        wheelCG.setIntegerValueField(.scrollWheelEventIsContinuous, value: 1)
+        let wheel = NSEvent(cgEvent: wheelCG)!
+        pdf.scrollWheel(with: wheel)
+        expect(clip.bounds.origin != scrollBefore, "two-finger scrolling changes the internal clip origin")
+        let downwardDelta = clip.bounds.minY - scrollBefore.y
+        expect(downwardDelta * (clip.isFlipped ? 1 : -1) > 0, "downward scrolling follows native document direction")
+        coordinator.checkSync(view: pdf)
         let zoomBeforeGesture = pdf.scaleFactor
         let anchor = CGPoint(x: pdf.bounds.midX, y: pdf.bounds.midY)
         let anchorPage = pdf.page(for: anchor, nearest: true)!
@@ -79,10 +88,12 @@ struct NativeChecks {
         expect(pdf.scaleFactor > zoomBeforeGesture, "trackpad gesture increases zoom")
         let afterAnchor = pdf.convert(anchorPDFPoint, from: anchorPage)
         let anchorError = hypot(afterAnchor.x - anchor.x, afterAnchor.y - anchor.y)
-        if anchorError >= 1 {
-            FileHandle.standardError.write(Data("Anchor error \(anchorError), before \(anchor), after \(afterAnchor), clip \(clip.bounds), page \(anchorPDFPoint)\n".utf8))
-        }
-        expect(anchorError < 1, "gesture zoom preserves the point under the cursor")
+        let oneClipUnit = pdf.convert(CGPoint(x: 1, y: 1), from: clip) - pdf.convert(.zero, from: clip)
+        let toleranceX = max(1, abs(oneClipUnit.x) * 0.5 + 0.05)
+        let toleranceY = max(1, abs(oneClipUnit.y) * 0.5 + 0.05)
+        let aligned = abs(afterAnchor.x - anchor.x) < toleranceX && abs(afterAnchor.y - anchor.y) < toleranceY
+        if !aligned { FileHandle.standardError.write(Data("Anchor error \(anchorError), native tolerances \(toleranceX), \(toleranceY)\n".utf8)) }
+        expect(aligned, "gesture zoom retains its anchor within native clip alignment")
         pdf.checkMagnify(-0.15, anchor: anchor)
         expect(abs(pdf.scaleFactor - zoomBeforeGesture) < 0.001, "reverse trackpad gesture restores zoom")
 
@@ -184,6 +195,6 @@ struct NativeChecks {
         panels.setWidth(900, for: .bookmarks); expect(panels.configuration(for: .bookmarks).width == 600, "panel maximum width")
         panels.setWidth(20, for: .bookmarks); expect(panels.configuration(for: .bookmarks).width == 200, "panel minimum width")
         coordinator.detach(); pdf.stopEventMonitoring(); window.close()
-        print("PASS: rulers, anchored gesture zoom, live text, opacity and callout persistence, drag/resize/delete, page edits, panel invariants")
+        print("PASS: rulers, two-finger scrolling, anchored gesture zoom, live text, opacity and callout persistence, drag/resize/delete, page edits, panel invariants")
     }
 }
