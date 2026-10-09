@@ -342,7 +342,16 @@ private func runTextBlockChecks() throws {
     let page = PDFDocument(data: changed)!.page(at: 0)!
     let text = page.string ?? ""
     let withoutWhitespace = text.filter { !$0.isWhitespace }
-    expect(withoutWhitespace.contains(replacement.filter { !$0.isWhitespace }),"wrapped paragraph retains every character, punctuation and Cyrillic")
+    if !withoutWhitespace.contains(replacement.filter { !$0.isWhitespace }) {
+        FileHandle.standardError.write(Data("PDFKit column reading order: \(text.debugDescription)\n".utf8))
+    }
+    let scopedBlock = try PDFSourceSession.editing(data: changed,pageIndex: 0,point: CGPoint(x: 80,y: 705))
+    expect(scopedBlock.snapshot.text.filter { !$0.isWhitespace } == replacement.filter { !$0.isWhitespace },"wrapped block retains every character, punctuation and Cyrillic")
+    expect(withoutWhitespace.contains("Привет"),"PDFKit also extracts the new Cyrillic word")
+    let serialized = PDFDocument(data: changed)!.dataRepresentation()!
+    let afterPDFKit = try PDFSourceSession.editing(data: serialized,pageIndex: 0,point: editing.resultingPoint!)
+    expect(afterPDFKit.snapshot.text.filter { !$0.isWhitespace } == replacement.filter { !$0.isWhitespace },"block text survives PDFKit serialization")
+    expect(abs(afterPDFKit.snapshot.width-110) < 0.01,"block width persists through PDFKit serialization")
     expect(text.contains("Neighbor column"),"text in the following content stream survives save/reopen")
     expect((editing.resultingBounds?.height ?? 0) > editing.snapshot.bounds.height,"block grows vertically instead of clipping new text")
     let memory = changed as NSData

@@ -78,6 +78,7 @@ final class PDFSourceSession {
         let color: NSColor
         var font: CTFont { CTFontCreateWithFontDescriptor(CTFontDescriptorCreateWithAttributes([kCTFontURLAttribute: url] as CFDictionary), size, nil) }
     }
+    private struct BlockInfo { let id: String; let text: String?; let width: CGFloat? }
     private struct Fragment {
         let object: FPDF_PAGEOBJECT
         let parent: FPDF_PAGEOBJECT?
@@ -86,6 +87,7 @@ final class PDFSourceSession {
         let bounds: CGRect
         let text: String
         let style: Style
+        let block: BlockInfo?
     }
     private struct EmbeddedFont { let handle: FPDF_FONT; let codes: [UInt32: UInt32] }
     private struct Glyph { let unicode: UInt32; let origin: CGPoint }
@@ -106,8 +108,10 @@ final class PDFSourceSession {
     private let matrix: FS_MATRIX
     private let styles: [Style] // One style per Swift Character in snapshot.text.
     private let leading: CGFloat
+    private let selectionPoint: CGPoint
     private var used = false
     private(set) var resultingBounds: CGRect?
+    private(set) var resultingPoint: CGPoint?
     private static let identity = FS_MATRIX(a: 1,b: 0,c: 0,d: 1,e: 0,f: 0)
 
     @MainActor static func editing(data: Data, pageIndex: Int, point: CGPoint) throws -> PDFSourceSession {
@@ -128,7 +132,7 @@ final class PDFSourceSession {
             guard fragment.parent == seed.parent,
                   abs(fragment.matrix.a-basis.a) < 0.02, abs(fragment.matrix.b-basis.b) < 0.02,
                   abs(fragment.matrix.c-basis.c) < 0.02, abs(fragment.matrix.d-basis.d) < 0.02,
-                  fragment.style.size >= seed.style.size*0.6, fragment.style.size <= seed.style.size*1.6 else { return nil }
+                  (seed.block == nil ? (fragment.block == nil && fragment.style.size >= seed.style.size*0.6 && fragment.style.size <= seed.style.size*1.6) : fragment.block?.id == seed.block?.id) else { return nil }
             return Positioned(fragment: fragment,box: transformed(fragment.bounds,by: inverse),baseline: transform(CGPoint(x: CGFloat(fragment.matrix.e),y: CGFloat(fragment.matrix.f)),by: inverse))
         }
         // PDF producers may emit one object per word or per glyph. Cluster by
@@ -150,7 +154,7 @@ final class PDFSourceSession {
             if !current.isEmpty { lines.append(Line(runs: current)) }
         }
         guard let selected = lines.firstIndex(where: { $0.runs.contains { $0.fragment.object == seed.object } }) else { throw PDFSourceError.textNotFound }
-        var chosen = Set([selected])
+        var chosen = seed.block == nil ? Set([selected]) : Set(lines.indices)
         func adjacent(_ a: Line, _ b: Line) -> Bool {
             let gap = abs(a.baseline-b.baseline), size = max(a.size,b.size)
             guard abs(a.size-b.size) <= size*0.12 else { return false }
@@ -163,7 +167,7 @@ final class PDFSourceSession {
         }
         // Walk only nearest aligned lines above/below, not every nearby object.
         var changed = true
-        while changed {
+        while changed && seed.block == nil {
             changed = false
             for index in Array(chosen) {
                 for direction: CGFloat in [-1,1] {
@@ -206,26 +210,38 @@ final class PDFSourceSession {
         let bounds = selectedFragments.reduce(CGRect.null) { $0.union($1.bounds) }
         let gaps = zip(block,block.dropFirst()).map { $0.baseline-$1.baseline }.sorted()
         let leading = gaps.isEmpty ? seed.style.size*1.2 : gaps[gaps.count/2]
-        let snapshot = Snapshot(text: text,bounds: bounds,fontSize: seed.style.size,fontName: seed.style.url.deletingPathExtension().lastPathComponent,color: seed.style.color,width: max(20,localBox.maxX-startX+1),fragmentCount: selectedFragments.count)
-        return PDFSourceSession(handle: handle,fragments: selectedFragments,matrix: placement,styles: styles,leading: leading,snapshot: snapshot)
+        if let logical = seed.block?.text,
+           logical.filter({ !$0.isWhitespace }) == text.filter({ !$0.isWhitespace }) {
+            styles = remapStyles(from: text,styles: styles,to: logical); text = logical
+        }
+        if styles.isEmpty { styles = [seed.style] }
+        let width = seed.block?.width ?? max(20,localBox.maxX-startX+1)
+        let container = transformed(CGRect(x: startX,y: localBox.minY,width: width,height: localBox.height),by: basis).union(bounds)
+        let snapshot = Snapshot(text: text,bounds: container,fontSize: seed.style.size,fontName: seed.style.url.deletingPathExtension().lastPathComponent,color: seed.style.color,width: width,fragmentCount: selectedFragments.count)
+        return PDFSourceSession(handle: handle,fragments: selectedFragments,matrix: placement,styles: styles,leading: leading,selectionPoint: point,snapshot: snapshot)
     }
     @MainActor static func adding(data: Data, pageIndex: Int, point: CGPoint, fontSize: CGFloat, color: NSColor, fontName: String = "Arial") throws -> PDFSourceSession {
         let handle = try PDFiumDocumentHandle(data: data,pageIndex: pageIndex)
         let url = try systemFontURL(fontName)
         let matrix = FS_MATRIX(a: 1,b: 0,c: 0,d: 1,e: Float(point.x),f: Float(point.y))
         let snapshot = Snapshot(text: "",bounds: CGRect(x: point.x,y: point.y,width: 240,height: max(20,fontSize*1.2)),fontSize: fontSize,fontName: url.deletingPathExtension().lastPathComponent,color: color,width: 240,fragmentCount: 0)
-        return PDFSourceSession(handle: handle,fragments: [],matrix: matrix,styles: [Style(url: url,size: fontSize,color: color)],leading: fontSize*1.2,snapshot: snapshot)
+        return PDFSourceSession(handle: handle,fragments: [],matrix: matrix,styles: [Style(url: url,size: fontSize,color: color)],leading: fontSize*1.2,selectionPoint: point,snapshot: snapshot)
     }
-    private init(handle: PDFiumDocumentHandle, fragments: [Fragment], matrix: FS_MATRIX, styles: [Style], leading: CGFloat, snapshot: Snapshot) {
-        self.handle = handle; self.fragments = fragments; self.matrix = matrix; self.styles = styles; self.leading = leading; self.snapshot = snapshot
+    private init(handle: PDFiumDocumentHandle, fragments: [Fragment], matrix: FS_MATRIX, styles: [Style], leading: CGFloat, selectionPoint: CGPoint, snapshot: Snapshot) {
+        self.handle = handle; self.fragments = fragments; self.matrix = matrix; self.styles = styles; self.leading = leading; self.selectionPoint = selectionPoint; self.snapshot = snapshot
     }
 
     /// Preserve styles on unchanged characters. Insertions inherit their neighbor;
     /// explicit size/color controls apply to the entire selected block.
     private func editedStyles(_ text: String, size: CGFloat, color: NSColor) -> [Style] {
-        let old = Array(snapshot.text), new = Array(text)
-        var result = Array(styles.prefix(old.count))
-        let fallback = styles.first!
+        let result = Self.remapStyles(from: snapshot.text,styles: styles,to: text)
+        return result.map { Style(url: $0.url,size: abs(size-snapshot.fontSize) < 0.01 ? $0.size : size,color: color.isEqual(snapshot.color) ? $0.color : color) }
+    }
+
+    private static func remapStyles(from originalText: String, styles originalStyles: [Style], to text: String) -> [Style] {
+        let old = Array(originalText), new = Array(text)
+        var result = Array(originalStyles.prefix(old.count))
+        let fallback = originalStyles.first!
         let difference = new.difference(from: old)
         let removed = difference.removals.compactMap { change -> Int? in
             if case let .remove(offset,_,_) = change { return offset }; return nil
@@ -238,7 +254,7 @@ final class PDFSourceSession {
             let inherited = result.isEmpty ? fallback : result[min(max(0,offset-1),result.count-1)]
             result.insert(inherited,at: offset)
         }
-        return result.map { Style(url: $0.url,size: abs(size-snapshot.fontSize) < 0.01 ? $0.size : size,color: color.isEqual(snapshot.color) ? $0.color : color) }
+        return result
     }
 
     @MainActor func applying(text: String, fontSize: CGFloat, color: NSColor, width: CGFloat? = nil) throws -> Data {
@@ -248,7 +264,7 @@ final class PDFSourceSession {
         let blockWidth = width ?? snapshot.width
         guard blockWidth.isFinite, blockWidth >= 10, blockWidth <= 20_000 else { throw PDFSourceError.content }
         if normalized == snapshot.text && abs(fontSize-snapshot.fontSize) < 0.01 && color.isEqual(snapshot.color) && abs(blockWidth-snapshot.width) < 0.01 {
-            resultingBounds = snapshot.bounds; return handle.originalData
+            resultingBounds = snapshot.bounds; resultingPoint = selectionPoint; return handle.originalData
         }
         let characterStyles = editedStyles(normalized,size: fontSize,color: color)
         let attributed = NSMutableAttributedString(string: normalized)
@@ -312,6 +328,8 @@ final class PDFSourceSession {
         }
         let typesetter = CTTypesetterCreateWithAttributedString(attributed)
         var objects: [FPDF_PAGEOBJECT] = [], cursor = 0, baseline: CGFloat = 0
+        let blockName = "BotPlusTextBlock_"+UUID().uuidString.replacingOccurrences(of: "-",with: "")
+        var sharedMark: FPDF_PAGEOBJECTMARK?
         let nsText = normalized as NSString
         do {
             while cursor < attributed.length {
@@ -347,6 +365,16 @@ final class PDFSourceSession {
                     let cgColor = attributes[kCTForegroundColorAttributeName] as! CGColor
                     let rgb = NSColor(cgColor: cgColor)?.usingColorSpace(.deviceRGB) ?? .black
                     _ = FPDFPageObj_SetFillColor(object,UInt32((rgb.redComponent*255).rounded()),UInt32((rgb.greenComponent*255).rounded()),UInt32((rgb.blueComponent*255).rounded()),UInt32((rgb.alphaComponent*255).rounded()))
+                    if let sharedMark {
+                        guard FPDFPageObj_AddExistingMark(object,sharedMark) != 0 else { FPDFPageObj_Destroy(object); throw PDFSourceError.content }
+                    } else {
+                        let mark = blockName.withCString { FPDFPageObj_AddMark(object,$0) }
+                        guard let mark else { FPDFPageObj_Destroy(object); throw PDFSourceError.content }
+                        let body = Data(normalized.utf8).base64EncodedString()
+                        guard body.withCString({ FPDFPageObjMark_SetStringParam(handle.document,object,mark,"Body",$0) }) != 0,
+                              FPDFPageObjMark_SetFloatParam(handle.document,object,mark,"Width",Float(blockWidth)) != 0 else { FPDFPageObj_Destroy(object); throw PDFSourceError.content }
+                        sharedMark = mark
+                    }
                     objects.append(object)
                 }
                 var ascent: CGFloat = 0, descent: CGFloat = 0, lineLeading: CGFloat = 0
@@ -371,7 +399,11 @@ final class PDFSourceSession {
         guard FPDFPage_GenerateContent(handle.page) != 0 else { throw PDFSourceError.content }
         var union = CGRect.null
         for object in objects { if let rect = Self.bounds(object) { union = union.union(rect) } }
-        resultingBounds = union.isNull ? nil : union
+        let container = Self.transformed(CGRect(x: 0,y: baseline+max(leading*fontSize/snapshot.fontSize,fontSize*1.2)-fontSize*0.3,width: blockWidth,height: max(fontSize,abs(baseline))),by: matrix)
+        resultingBounds = union.isNull ? nil : union.union(container)
+        if let first = objects.compactMap({ Self.bounds($0) }).first(where: { !$0.isEmpty }) {
+            resultingPoint = CGPoint(x: first.midX,y: first.midY)
+        }
         // Validate each generated object's text, not a clipped/partial page selection.
         if let check = FPDFText_LoadPage(handle.page) {
             defer { FPDFText_ClosePage(check) }
@@ -413,7 +445,29 @@ final class PDFSourceSession {
         var r: UInt32 = 0, g: UInt32 = 0, b: UInt32 = 0, a: UInt32 = 255
         _ = FPDFPageObj_GetFillColor(object,&r,&g,&b,&a)
         let color = NSColor(calibratedRed: CGFloat(r)/255,green: CGFloat(g)/255,blue: CGFloat(b)/255,alpha: CGFloat(a)/255)
-        result.append(Fragment(object: object,parent: parent,rootIndex: rootIndex,matrix: effective,bounds: transformed(rect,by: parentMatrix),text: text,style: Style(url: url,size: max(1,physicalSize),color: color)))
+        result.append(Fragment(object: object,parent: parent,rootIndex: rootIndex,matrix: effective,bounds: transformed(rect,by: parentMatrix),text: text,style: Style(url: url,size: max(1,physicalSize),color: color),block: blockInfo(object)))
+    }
+    private static func blockInfo(_ object: FPDF_PAGEOBJECT) -> BlockInfo? {
+        for index in 0..<max(0,FPDFPageObj_CountMarks(object)) {
+            guard let mark = FPDFPageObj_GetMark(object,UInt(index)) else { continue }
+            var length: UInt = 0
+            guard FPDFPageObjMark_GetName(mark,nil,0,&length) != 0, length > 0, length < 4096 else { continue }
+            var buffer = [UInt16](repeating: 0,count: Int(length/2))
+            _ = buffer.withUnsafeMutableBufferPointer { FPDFPageObjMark_GetName(mark,$0.baseAddress,length,&length) }
+            let name = String(decoding: buffer.prefix { $0 != 0 },as: UTF16.self)
+            guard name.hasPrefix("BotPlusTextBlock_") else { continue }
+            var body: String?
+            if FPDFPageObjMark_GetParamStringValue(mark,"Body",nil,0,&length) != 0, length > 0, length < 12_000_000 {
+                buffer = [UInt16](repeating: 0,count: Int(length/2))
+                _ = buffer.withUnsafeMutableBufferPointer { FPDFPageObjMark_GetParamStringValue(mark,"Body",$0.baseAddress,length,&length) }
+                let encoded = String(decoding: buffer.prefix { $0 != 0 },as: UTF16.self)
+                if let data = Data(base64Encoded: encoded) { body = String(data: data,encoding: .utf8) }
+            }
+            var width: Float = 0
+            let validWidth = FPDFPageObjMark_GetParamFloatValue(mark,"Width",&width) != 0 && width.isFinite && width >= 10 && width <= 20000
+            return BlockInfo(id: name,text: body,width: validWidth ? CGFloat(width) : nil)
+        }
+        return nil
     }
     private static func indexedText(_ page: FPDF_TEXTPAGE) -> [UInt: [Glyph]] {
         var result: [UInt: [Glyph]] = [:]

@@ -1816,13 +1816,13 @@ private struct PDFViewer: NSViewRepresentable {
             if let error = error as? PDFSourceError { manager.say(error.english, error.russian) }
             else { manager.say("Could not modify the PDF text.", "Не удалось изменить текст PDF.") }
         }
-        private func installSourceData(_ data: Data, item: PDFDocumentItem, index: Int, view: PDFViewerView, bounds: CGRect?) throws {
+        private func installSourceData(_ data: Data, item: PDFDocumentItem, index: Int, view: PDFViewerView, bounds: CGRect?, anchor: CGPoint? = nil) throws {
             guard let document = PDFDocument(data: data), document.pageCount == item.pageCount else { throw PDFSourceError.save }
             AnnotationMetadata.restore(document)
             item.document = document; item.pageIndex = index
             reload(view, document: item, pageIndex: index)
             if let bounds, let page = document.page(at: index) {
-                view.setSourceSelection((page, bounds)); sourceAnchor = (index, CGPoint(x: bounds.midX, y: bounds.midY))
+                view.setSourceSelection((page, bounds)); sourceAnchor = (index, anchor ?? CGPoint(x: bounds.midX, y: bounds.midY))
             } else { view.setSourceSelection(nil); sourceAnchor = nil }
             manager.pageText = String(index + 1); manager.send(.refresh)
         }
@@ -1868,7 +1868,7 @@ private struct PDFViewer: NSViewRepresentable {
                             ? PDFSourceSession.adding(data: data,pageIndex: index,point: point,fontSize: session.snapshot.fontSize,color: session.snapshot.color)
                             : PDFSourceSession.editing(data: data,pageIndex: index,point: point)
                         let changed = try committing.applying(text: text,fontSize: size,color: color,width: width)
-                        try self.installSourceData(changed,item: item,index: index,view: view,bounds: committing.resultingBounds)
+                        try self.installSourceData(changed,item: item,index: index,view: view,bounds: committing.resultingBounds,anchor: committing.resultingPoint)
                         self.sourcePopover = nil
                         return true
                     } catch { self.sourceError(error); return false }
@@ -1948,7 +1948,7 @@ private struct PDFViewer: NSViewRepresentable {
                         var updated = session.snapshot.text; updated.removeSubrange(range); remaining = updated
                     } else { remaining = "" }
                     let data = try session.applying(text: remaining, fontSize: session.snapshot.fontSize, color: session.snapshot.color)
-                    try installSourceData(data, item: item, index: index, view: view, bounds: session.resultingBounds)
+                    try installSourceData(data, item: item, index: index, view: view, bounds: session.resultingBounds, anchor: session.resultingPoint)
                 }
             } catch { sourceError(error) }
         }
@@ -1963,7 +1963,7 @@ private struct PDFViewer: NSViewRepresentable {
                     remaining = session.snapshot.text; remaining.removeSubrange(range)
                 }
                 let data = try session.applying(text: remaining, fontSize: session.snapshot.fontSize, color: session.snapshot.color)
-                try installSourceData(data, item: item, index: index, view: view, bounds: session.resultingBounds)
+                try installSourceData(data, item: item, index: index, view: view, bounds: session.resultingBounds, anchor: session.resultingPoint)
             } catch { sourceError(error) }
         }
         private func pasteAnnotationData(_ data: Data, on view: PDFViewerView) -> Bool {
@@ -2002,7 +2002,7 @@ private struct PDFViewer: NSViewRepresentable {
                 let session = try PDFSourceSession.adding(data: sourceData(item), pageIndex: index, point: point, fontSize: size, color: color, fontName: style?.fontName ?? "Arial")
                 let changed = try session.applying(text: text, fontSize: size, color: color)
                 manager.tool = .editText
-                try installSourceData(changed, item: item, index: index, view: view, bounds: session.resultingBounds)
+                try installSourceData(changed, item: item, index: index, view: view, bounds: session.resultingBounds, anchor: session.resultingPoint)
             } catch { sourceError(error) }
         }
 
