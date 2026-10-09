@@ -2,39 +2,53 @@
 
 [![macOS 14+](https://img.shields.io/badge/macOS-14%2B-000000?logo=apple)](https://www.apple.com/macos/)
 [![Swift 6](https://img.shields.io/badge/Swift-6-F05138?logo=swift&logoColor=white)](https://www.swift.org/)
-[![Dependencies](https://img.shields.io/badge/external%20dependencies-zero-success)](#technology)
-[![Apple Silicon](https://img.shields.io/badge/Apple%20Silicon-native-777777?logo=apple)](https://developer.apple.com/)
+[![Зависимости](https://img.shields.io/badge/внешние_зависимости-нет-success)](#технологии)
+[![Apple Silicon](https://img.shields.io/badge/Apple%20Silicon-arm64-777777?logo=apple)](https://developer.apple.com/)
 
-A native macOS PDF workspace built with SwiftUI, AppKit, and Apple PDFKit. Its ribbon ergonomics, dockable panels, and drafting-oriented workflows take inspiration from PDF-XChange Editor, with a bilingual Russian and English interface. Ribbon tab widths remain fixed when the active tab changes.
+Нативный PDF-редактор для macOS и Apple Silicon. Ленточный интерфейс, боковые панели и инструменты аннотаций вдохновлены удобством PDF-XChange Editor. Приложение написано на SwiftUI, AppKit и Apple PDFKit; интерфейс переключается между русским и английским языками.
 
-## Features
+[Скачать актуальный DMG](https://github.com/Davud77/BotPlus-PDF-Editor/releases/latest/download/BotPlus-PDF-Editor.dmg) · [Релизы](https://github.com/Davud77/BotPlus-PDF-Editor/releases) · [Telegram](https://t.me/botplus_pdf) · [English README](README.en.md)
 
-- Windows-style dark ribbon with 13 localized tabs, grouped commands, and a 40 pt quick-access/title/search row drawn into the transparent native titlebar area beside the macOS traffic lights.
-- PDFKit viewport with PDF opening, drag and drop, continuous/single/two-page display, hand and text selection, page navigation, zoom, rotation, and guarded printing.
-- Live free-text editing with font size, color, opacity, and border controls; highlight/underline; rectangle, line, arrow, and grouped callout annotations.
-- Annotation selection, dragging, four-corner resizing, Delete/Backspace removal, and live vector drag previews.
-- Page insertion, duplication with annotations, deletion, and rotation. Save / Save As continues writing to the selected export URL.
-- Panel icon strips, one drawer per sidebar, direct left/right docking buttons, detachable NSPanel windows, and persistent docking/width state (200–600 pt).
-- Crop-box rulers based on PDFView coordinate conversion, with points/mm/inches, rotated-page support, clip-view scroll notifications, scale/page notifications, and live cursor hairlines.
-- Russian and English UI language selection under Help → UI Settings.
-- BotPlus app mark available as SVG, a SwiftUI preview, and a native icon asset catalog.
+## Возможности
 
-Commands without implemented PDF behavior show a localized development notice. The engineering measurement tools, advanced bookmark editing, interactive forms, and cryptographic signing are planned in [ROADMAP.md](ROADMAP.md).
+- Тёмная лента с 13 вкладками, постоянной шириной заголовков и панелью быстрых действий рядом с кнопками окна macOS.
+- Несколько открытых PDF во вкладках; открытие через диалог, перетаскивание файла и двойной щелчок по пустой рабочей области.
+- Непрерывное отображение, отдельные страницы и развороты; навигация, поворот, масштабирование, печать, инструмент «Рука» и выделение текста.
+- Прокрутка двумя пальцами при любом выбранном инструменте и масштабирование жестом на трекпаде.
+- Текстовые аннотации с вводом в реальном времени, размером шрифта, цветом, прозрачностью и рамкой.
+- Подсветка и подчёркивание текста; прямоугольники, линии, стрелки и выноски с предпросмотром при рисовании.
+- Выделение, перемещение, изменение размера и удаление аннотаций; повторное редактирование текста двойным щелчком.
+- Вставка пустой страницы, дублирование с аннотациями и удаление текущей страницы. В документе сохраняется хотя бы одна страница.
+- Боковые полосы значков, размещение панелей слева или справа, отсоединяемые окна и изменение ширины в пределах 200–600 пунктов. Выбор панели выполняется значком сбоку, без дублирующих нижних вкладок.
+- Линейки в пунктах, миллиметрах и дюймах, синхронизированные с прокруткой, масштабом и поворотом страницы; указатели положения курсора.
+- Сохранение изменений в PDF и «Сохранить как» с обновлением рабочего пути файла.
 
-## Technology
+Часть команд ленты ещё находится в разработке и показывает соответствующее уведомление. Инженерные измерения с калибровкой, расширенное редактирование закладок, OCR, формы и криптографические подписи описаны в [плане развития](ROADMAP.md).
 
-- macOS 14 or later; Swift 6; Xcode 16 or later recommended.
-- Apple Silicon is the primary target. The project uses only Apple SDK frameworks: SwiftUI, AppKit, PDFKit, and UniformTypeIdentifiers.
-- No third-party packages or runtime dependencies.
-- App Sandbox is enabled with user-selected PDF read/write access. Signing and notarization identities are configured in Xcode for your distribution account.
+## Установка
 
-## Build with Xcode
+Требуются macOS 14 или новее и Mac с Apple Silicon (arm64).
 
-1. Open `BotPlusPDFEditor.xcodeproj`.
-2. Select the `BotPlusPDFEditor` scheme and a My Mac destination.
-3. Choose **Product → Run** (⌘R).
+1. Скачайте `BotPlus-PDF-Editor.dmg` из раздела [Releases](https://github.com/Davud77/BotPlus-PDF-Editor/releases).
+2. Откройте DMG и перетащите **BotPlus PDF Editor.app** в **Applications**.
+3. Запустите приложение из папки «Программы».
 
-Or build from Terminal:
+Текущая сборка использует подпись ad-hoc и не прошла нотарификацию Apple. macOS может потребовать вручную разрешить запуск скачанного приложения.
+
+## Технологии
+
+- Swift 6; Xcode 16 или новее.
+- Только Apple SDK: SwiftUI, AppKit, PDFKit и UniformTypeIdentifiers.
+- Внешних пакетов и зависимостей во время выполнения нет.
+- App Sandbox включён; предоставлен доступ на чтение и запись к выбранным пользователем файлам.
+
+Рабочий файл приложения — `ContentView.swift`. Xcode собирает его вместе с каталогом иконок и настройками sandbox.
+
+## Сборка в Xcode
+
+Откройте `BotPlusPDFEditor.xcodeproj`, выберите схему **BotPlusPDFEditor**, устройство **My Mac** и нажмите **⌘R**.
+
+Сборка Release из корня проекта:
 
 ```sh
 xcodebuild -project BotPlusPDFEditor.xcodeproj \
@@ -44,78 +58,52 @@ xcodebuild -project BotPlusPDFEditor.xcodeproj \
   -derivedDataPath build/DerivedData build
 ```
 
-The app is written in `ContentView.swift` and compiles as the target’s single Swift source file. The Xcode project includes the icon asset catalog and sandbox entitlements.
+## Работа с документом
 
-## App icon
+Включите **Вид → Линейки** и выберите единицы в углу линеек или в строке состояния. Координаты отсчитываются от области обрезки страницы: X направлен вправо, Y — вверх в координатах PDF. Линейки учитывают поворот страницы.
 
-`AppIcon.svg` is the editable 1024 × 1024 vector master. `AppIconPreviewView` in `ContentView.swift` draws the mark using SwiftUI Canvas. To regenerate the standard macOS PNG icon set with Apple’s AppKit renderer:
+Значки сбоку открывают и сворачивают панели. Стрелки в заголовке перемещают панель влево или вправо. Отсоединение открывает отдельное окно NSPanel; его системная кнопка закрытия возвращает панель в боковую область. Кнопка X в заголовке скрывает панель.
 
-```sh
-swift Tools/export_app_icon.swift
-```
+В **Комментарий → Печатная машинка** нажмите на страницу, введите текст и настройте оформление. **Готово** или щелчок снаружи сохраняет аннотацию; **Отмена** отменяет ввод. Для текстовой разметки сначала выделите текст, затем выберите подсветку или подчёркивание.
 
-This writes PNGs and `Contents.json` into `Assets.xcassets/AppIcon.appiconset`, already connected to the Xcode target. You can also open `AppIcon.svg` in a vector editor and export the standard icon sizes.
+В **Главная → Выделить комментарии** можно перемещать аннотации, изменять размер угловыми маркерами и удалять их клавишами Delete/Backspace. Двойной щелчок по текстовой аннотации открывает редактор. Цвет, толщину и прозрачность можно задать в панели «Свойства».
 
-## Runtime notes
+Настройки оформления и связи компонентов выносок сохраняются в скрытой непечатаемой аннотации метаданных. Видимые аннотации используют стандартные типы PDF; информация исходного документа сохраняется.
 
-The app defines no AppIntents types or shortcut declarations. Xcode may still invoke its metadata scanner for an application target; the scanner reports that extraction was skipped because AppIntents.framework is not linked. Live Text interaction is disabled at runtime when the installed PDFKit exposes its setter. Viewport-to-SwiftUI state synchronization is deferred until after AppKit updates complete to avoid publishing ObservableObject changes during representable updates. Errors from macOS services such as `linkd.autoShortcut`, and PDFKit OCR model availability diagnostics, depend on the host runtime and cannot be suppressed by app code when those system services are unavailable.
-
-## Workspace and editing
-
-Enable **View → Rulers** and choose pt/mm/in from the ruler corner or status bar. Two-finger scrolling pans the document with every tool. Pinch on the trackpad to zoom around the cursor; Command/Control-scroll also zooms. Coordinates are relative to the crop box: X increases to the right and Y increases upward in page space. Page rotation changes which PDF axis is shown by each ruler; ticks remain aligned with the displayed PDF.
-
-Use the side-strip icons to open or collapse a drawer. The side strip selects the active panel; no duplicate bottom tabs are shown. The header arrows move a panel directly left or right. Detach opens an NSPanel; its native close button re-docks it. The panel header X hides the panel. Resize with the divider; widths are also constrained by the space available for the document viewport.
-
-Use **Comment → Typewriter** and click a page to type in the live editor. Click Done or outside the popover to commit; Cancel restores existing text or removes a new annotation. Select PDF text and choose Highlight or Underline to create markup. Drag with Rectangle, Line, Arrow, or Callout to place vectors. Adjust defaults in the Properties inspector, or select an annotation and choose Apply to selected.
-
-Use **Home → Select Comments** to select an annotation. Drag its body to move it, drag one of its four handles to resize it, or press Delete/Backspace to remove it. Double-click a free-text annotation to reopen its editor. Callouts use a standard line and free-text annotation linked by persisted BotPlus metadata; moving the text updates the leader, and deleting either component removes the group.
-
-**Organize → Pages** inserts a blank page before the current page, duplicates the current page after it, or deletes it. Deletion keeps at least one page in the document.
-
-BotPlus preserves appearance settings and callout associations in a hidden, non-printing metadata annotation on each annotated page. Visible annotations are standard PDF types, and existing document metadata remains unchanged. PDFKit appearance streams retain transparency for other PDF readers.
-
-## Release build, DMG, and Git deployment
+## Сборка DMG и публикация исходников
 
 ```sh
 ./build_and_deploy.sh --package-only
 ```
 
-This builds Release for arm64, signs a staging copy, creates a writable HFS+ image, mounts it, adds the app and an Applications shortcut, detaches it, converts it to compressed UDZO, and verifies the result. Output files are `dist/BotPlus-PDF-Editor.dmg` and its SHA-256 checksum. Temporary mounts are cleaned up on failure or interruption.
+Скрипт собирает Release для arm64, подписывает копию приложения, создаёт и монтирует временный образ, добавляет приложение и ссылку на Applications, затем преобразует образ в сжатый UDZO и проверяет его. Результат: `dist/BotPlus-PDF-Editor.dmg` и файл SHA-256.
 
 ```sh
 ./build_and_deploy.sh
 ```
 
-GitHub Actions also runs the native checks and this packaging pipeline after a push to main. The resulting DMG and checksum are available as the workflow artifact.
+Полный режим также создаёт коммит с изменениями и отправляет ветку `main` в этот репозиторий. Для отправки нужны настроенные учётные данные Git. Образы и промежуточные файлы сборки не включаются в Git.
 
-The default command also stages source changes, commits with `feat: add dynamic rulers, dockable panels, and editing tools`, and pushes `main` to `https://github.com/Davud77/BotPlus-PDF-Editor.git`. Git credentials and the remote repository must already be available. Release binaries are ignored by Git.
+GitHub Actions выполняет нативные проверки и сборку DMG после отправки в `main`. Образ и контрольная сумма доступны в артефактах workflow.
 
-An ad-hoc signature is the default for local use. Set `BOTPLUS_SIGNING_IDENTITY` to an installed Developer ID Application certificate name for distribution signing. Set `BOTPLUS_NOTARY_PROFILE` to an existing notarytool Keychain profile to submit the DMG and staple its notarization ticket. These credentials are read from the environment, never stored in the repository. Set `BOTPLUS_DERIVED_DATA` to choose another Xcode build directory.
+Для подписи Developer ID задайте `BOTPLUS_SIGNING_IDENTITY` с именем установленного сертификата. Для нотарификации задайте `BOTPLUS_NOTARY_PROFILE` с именем существующего профиля Keychain для notarytool. Путь сборки можно изменить через `BOTPLUS_DERIVED_DATA`. Без сертификата применяется подпись ad-hoc.
 
-## Native verification
+## Проверки и иконка
 
 ```sh
 ./Tools/verify_native.sh
+swift Tools/export_app_icon.swift
 ```
 
-The checks exercise coordinate conversions at 0/90/180/270°, pan/zoom geometry, anchored gesture magnification, live text, PDF annotation and opacity round-trips, callout grouping, drag/resize/delete, page edits, and panel state. The test runner creates a hidden window and temporary PDFs; it does not modify project PDFs.
+Нативные проверки охватывают преобразование координат и поворот страниц, прокрутку и масштабирование, сохранение аннотаций и прозрачности, выноски, перемещение/изменение размера/удаление, операции со страницами и состояние панелей. Временные PDF создаются отдельно от пользовательских документов.
 
-## Repository setup
+`AppIcon.svg` — векторный исходник 1024 × 1024. `AppIconPreviewView` рисует знак средствами SwiftUI Canvas; скрипт экспортирует PNG в `Assets.xcassets/AppIcon.appiconset`.
 
-Review the files, then initialize and commit the local repository with:
+## Поддержка
 
-```sh
-./deploy_to_github.sh
-```
+- [GitHub проекта](https://github.com/Davud77/BotPlus-PDF-Editor) — кнопка «Поддержка» во вкладке «Помощь».
+- [Telegram: botplus_pdf](https://t.me/botplus_pdf) — кнопка «Телеграм» в той же вкладке.
 
-To push after configuring Git credentials, run:
+## Лицензия
 
-```sh
-./deploy_to_github.sh --push
-```
-
-The script sets `origin` to `https://github.com/Davud77/BotPlus-PDF-Editor.git` and pushes the `main` branch only when `--push` is provided. Remote creation requires the explicit `--create-remote` option and an authenticated `gh` CLI; GitHub prompts for repository visibility.
-
-## License
-
-No license has been selected yet. Add a `LICENSE` file before distributing source code publicly.
+Лицензия проекта пока не выбрана. Файл `LICENSE` будет добавлен после принятия решения об условиях распространения исходников.

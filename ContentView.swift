@@ -6,9 +6,9 @@ import UniformTypeIdentifiers
 private enum BotPlusBrand {
     static let name = "BotPlus PDF Editor"
     static let version = "1.0.0"
-    static let copyright = "Copyright © 2026 BotPlus. All rights reserved."
-    static let primaryWebsite = URL(string: "https://botplus.ru")!
-    static let alternateWebsite = URL(string: "https://botplus.io")!
+    static let copyright = "© 2026 BotPlus"
+    static let supportURL = URL(string: "https://github.com/Davud77/BotPlus-PDF-Editor")!
+    static let telegramURL = URL(string: "https://t.me/botplus_pdf")!
 }
 
 // Single-file macOS PDF workspace. Replace the template app entry point with this file.
@@ -424,7 +424,7 @@ private final class DocumentManager: ObservableObject {
     func perform(_ action: RibbonAction) {
         if selected == nil {
             switch action {
-            case .open, .settings, .toggleLanguage, .toggleRulers, .panels, .languagePicker, .about, .development: break
+            case .open, .settings, .toggleLanguage, .toggleRulers, .panels, .languagePicker, .about, .support, .telegram, .development: break
             default: say("Open a PDF first.", "Сначала откройте PDF-файл."); return
             }
         }
@@ -458,7 +458,15 @@ private final class DocumentManager: ObservableObject {
         case .panels: break
         case .languagePicker: break
         case .about: isAboutPresented = true
+        case .support: openExternalLink(BotPlusBrand.supportURL)
+        case .telegram: openExternalLink(BotPlusBrand.telegramURL)
         case .development: say("Feature in development", "Функция в разработке")
+        }
+    }
+
+    private func openExternalLink(_ url: URL) {
+        if !NSWorkspace.shared.open(url) {
+            say("Could not open the link.", "Не удалось открыть ссылку.")
         }
     }
 }
@@ -577,7 +585,7 @@ private enum RibbonAction {
     case open, save, saveAs, close, print, settings
     case tool(PDFTool), layout(PageLayout), zoomIn, zoomOut, actualSize, fitPage, fitWidth
     case rotateLeft, rotateRight, previous, next, first, last, highlight, toggleLanguage, toggleRulers
-    case panels, languagePicker, about, underline, insertBlankPage, deletePage, duplicatePage, development
+    case panels, languagePicker, about, support, telegram, underline, insertBlankPage, deletePage, duplicatePage, development
 }
 
 private struct RibbonCommand: Identifiable {
@@ -753,10 +761,6 @@ private struct AboutDialog: View {
             Text(BotPlusBrand.name).font(.system(size: 20, weight: .semibold))
             Text("\(manager.language == .ru ? "Версия" : "Version") \(BotPlusBrand.version)").font(.system(size: 12)).foregroundStyle(Palette.muted)
             Text(BotPlusBrand.copyright).font(.system(size: 11)).foregroundStyle(Palette.muted)
-            HStack(spacing: 16) {
-                Link("botplus.ru", destination: BotPlusBrand.primaryWebsite)
-                Link("botplus.io", destination: BotPlusBrand.alternateWebsite)
-            }
             Button(manager.language == .ru ? "Закрыть" : "Close") { manager.isAboutPresented = false }
                 .keyboardShortcut(.defaultAction)
         }
@@ -923,8 +927,8 @@ private struct RibbonView: View {
                     RibbonGroupSpec("convert", "Convert", "Преобразовать", [cmd("bookmarkTOC", "Create Table of Contents", "Создать Содержание", "list.bullet.indent"), cmd("bookmarkLinks", "Link for Bookmarks", "Ссылка для закладок", "link.badge.plus"), cmd("bookmarkSortPages", "Sort Pages", "Сортировка страниц", "doc.text.magnifyingglass"), cmd("bookmarkNamed", "Convert to Named Destinations", "Преобр. в им. назначения", "bookmark.fill"), cmd("bookmarkHTML", "Export to HTML", "Экспорт в HTML", "chevron.left.forwardslash.chevron.right"), cmd("bookmarkText", "Export to Text File", "Экспортировать в текстовый файл", "doc.text")])]
         case .help:
             return [RibbonGroupSpec("ui", "UI Settings", "Настройки интерфейса", [cmd("theme", "Theme", "Тема", "circle.lefthalf.filled"), cmd("customize", "Customize Ribbon", "Настроить ленту", "slider.horizontal.3"), RibbonCommand("language", "Language", "Язык", "globe", .languagePicker)]),
-                    RibbonGroupSpec("help", "Help", "Справка", [cmd("onlineHelp", "Online Help", "Справка в интернете", "questionmark.circle"), cmd("support", "Support", "Поддержка", "person.crop.circle.badge.questionmark"), cmd("args", "Command Line", "Командная строка", "terminal")]),
-                    RibbonGroupSpec("product", "Product", "Программа", [RibbonCommand("about", "About", "О программе", "info.circle", .about), cmd("updates", "Check Updates", "Проверить обновления", "arrow.clockwise"), cmd("associations", "File Associations", "Связи файлов", "doc.badge.gearshape"), cmd("license", "License", "Лицензия", "key")])]
+                    RibbonGroupSpec("help", "Contact", "Контакты", [RibbonCommand("support", "Support", "Поддержка", "person.crop.circle.badge.questionmark", .support), RibbonCommand("telegram", "Telegram", "Телеграм", "paperplane", .telegram)]),
+                    RibbonGroupSpec("product", "Product", "Программа", [RibbonCommand("about", "About", "О программе", "info.circle", .about), cmd("updates", "Check Updates", "Проверить обновления", "arrow.clockwise"), cmd("license", "License", "Лицензия", "key")])]
         }
     }
 
