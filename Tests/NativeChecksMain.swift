@@ -194,7 +194,166 @@ struct NativeChecks {
         expect(panels.activePanel(on: .left) == .bookmarks, "pinned drawer survives viewport click")
         panels.setWidth(900, for: .bookmarks); expect(panels.configuration(for: .bookmarks).width == 600, "panel maximum width")
         panels.setWidth(20, for: .bookmarks); expect(panels.configuration(for: .bookmarks).width == 200, "panel minimum width")
+        try runPDFiumChecks(root: root)
+        try runTextBlockChecks()
+        // Use an isolated pasteboard, preserving the user's clipboard.
+        let board = NSPasteboard.withUniqueName()
+        defer { board.releaseGlobally() }
+        pdf.go(to: activePage)
+        let pasteTarget = pdf.currentPage!
+        let existingCount = pasteTarget.annotations.filter { !AnnotationMetadata.isContainer($0) }.count
+        let copiedData = coordinator.checkClipboardData(arrow)
+        expect(copiedData != nil, "serializes a copied annotation object")
+        if !board.name.rawValue.isEmpty {
+            expect(coordinator.checkCopy(arrow,board: board), "copies an annotation object to the system pasteboard")
+            coordinator.checkPaste(view: pdf,board: board)
+        } else {
+            print("SKIP: system pasteboard unavailable in this execution sandbox; object data round-trip still checked")
+            expect(coordinator.checkPasteData(copiedData!,view: pdf), "pastes serialized annotation data")
+        }
+        let afterPasteCount = pasteTarget.annotations.filter { !AnnotationMetadata.isContainer($0) }.count
+        expect(afterPasteCount == existingCount + 1, "pastes the copied annotation onto the current page")
+        let pasted = pdf.selectedAnnotation!
+        expect(pasted !== arrow && pasted.type == "Line", "paste creates an independent object")
+        expect(abs(AnnotationMetadata.alpha(of: pasted) - 0.45) < 0.001, "clipboard preserves opacity")
+        expect(pdf.deleteSelectedAnnotation(), "Object Delete removes the pasted annotation")
+        let light = NSAppearance(named: .aqua)!
+        var lightValue: CGFloat = 0
+        light.performAsCurrentDrawingAppearance { lightValue = NSColor(Palette.ribbon).usingColorSpace(.deviceRGB)!.redComponent }
+        let dark = NSAppearance(named: .darkAqua)!
+        var darkValue: CGFloat = 0
+        dark.performAsCurrentDrawingAppearance { darkValue = NSColor(Palette.ribbon).usingColorSpace(.deviceRGB)!.redComponent }
+        expect(lightValue > 0.8 && darkValue < 0.3, "theme palette resolves both light and dark appearances")
         coordinator.detach(); pdf.stopEventMonitoring(); window.close()
         print("PASS: rulers, two-finger scrolling, anchored gesture zoom, live text, opacity and callout persistence, drag/resize/delete, page edits, panel invariants")
     }
+}
+
+extension PDFViewer.Coordinator {
+    fileprivate func checkCopy(_ annotation: PDFAnnotation, board: NSPasteboard) -> Bool { copyAnnotationObjects(annotation, board: board) }
+    fileprivate func checkPaste(view: PDFViewerView, board: NSPasteboard) { pasteObjects(on: view, board: board) }
+    fileprivate func checkClipboardData(_ annotation: PDFAnnotation) -> Data? { annotationClipboardData(annotation) }
+    fileprivate func checkPasteData(_ data: Data, view: PDFViewerView) -> Bool { pasteAnnotationData(data,on: view) }
+}
+
+@MainActor
+private func runPDFiumChecks(root: URL) throws {
+    func expect(_ condition: @autoclosure () -> Bool, _ message: String) {
+        if !condition() { fatalError("PDFIUM CHECK FAILED: \(message)") }
+    }
+    // Initialize through the same document-session path before calling fixture APIs.
+    let seed = PDFDocument(); let seedPage = PDFPage(); seedPage.setBounds(CGRect(x: 0,y: 0,width: 612,height: 792),for: .mediaBox); seed.insert(seedPage,at: 0)
+    let initialize = try PDFSourceSession.adding(data: seed.dataRepresentation()!,pageIndex: 0,point: CGPoint(x: 72,y: 700),fontSize: 16,color: .black)
+    _ = try initialize.applying(text: "Seed",fontSize: 16,color: .black)
+    let document = FPDF_CreateNewDocument()!
+    let page = FPDFPage_New(document,0,612,792)!
+    let object = "Helvetica".withCString { FPDFPageObj_NewTextObj(document,$0,16) }!
+    let original = "Original PDF content"
+    let utf16 = Array(original.utf16) + [0]
+    expect(utf16.withUnsafeBufferPointer { FPDFText_SetText(object,$0.baseAddress) } != 0, "fixture text")
+    var matrix = FS_MATRIX(a: 1,b: 0,c: 0,d: 1,e: 72,f: 700)
+    expect(FPDFPageObj_SetMatrix(object,&matrix) != 0, "fixture matrix")
+    expect(FPDFPage_InsertObject(page,object) != 0, "fixture insertion")
+    let rectangle = FPDFPageObj_CreateNewRect(400,400,60,60)!
+    _ = FPDFPageObj_SetFillColor(rectangle,255,255,0,255); _ = FPDFPath_SetDrawMode(rectangle,FPDF_FILLMODE_WINDING,0)
+    expect(FPDFPage_InsertObject(page,rectangle) != 0, "fixture vector")
+    expect(FPDFPage_GenerateContent(page) != 0, "fixture content")
+    var length = 0
+    let bytes = BotPlusPDFium_SaveDocument(document,&length)!
+    let data = Data(bytes: bytes,count: length); BotPlusPDFium_Free(bytes)
+    FPDF_ClosePage(page); FPDF_CloseDocument(document)
+    let session = try PDFSourceSession.editing(data: data,pageIndex: 0,point: CGPoint(x: 100,y: 705))
+    expect(session.snapshot.text.contains(original), "reads the original content object")
+    let replacement = "Новый исходный текст"
+    let edited = try session.applying(text: replacement,fontSize: 18,color: .systemBlue,width: 400)
+    let pdf = PDFDocument(data: edited)!
+    expect(pdf.page(at: 0)!.string?.contains(replacement) == true, "replacement is searchable PDF page text")
+    expect(pdf.page(at: 0)!.string?.contains(original) != true, "old original text is removed, not covered by an annotation")
+    expect(pdf.page(at: 0)!.annotations.isEmpty, "source editing does not create a free-text annotation")
+    let path = root.appendingPathComponent("edited-content.pdf")
+    expect(pdf.write(to: path), "modified content saves")
+    expect(PDFDocument(url: path)?.page(at: 0)?.string?.contains(replacement) == true, "modified text survives reopening")
+    let memory = edited as NSData
+    let checkDoc = FPDF_LoadMemDocument64(memory.bytes,memory.length,nil)!
+    let checkPage = FPDF_LoadPage(checkDoc,0)!
+    expect(FPDFPage_CountObjects(checkPage) == 2, "editing preserves the vector object")
+    FPDF_ClosePage(checkPage); FPDF_CloseDocument(checkDoc)
+    let removing = try PDFSourceSession.editing(data: edited,pageIndex: 0,point: CGPoint(x: 100,y: 705))
+    let deleted = try removing.applying(text: "",fontSize: 18,color: .black)
+    expect(PDFDocument(data: deleted)?.page(at: 0)?.string?.contains(replacement) != true, "source Delete removes the text layer object")
+    let adding = try PDFSourceSession.adding(data: deleted,pageIndex: 0,point: CGPoint(x: 72,y: 600),fontSize: 16,color: .black)
+    let added = try adding.applying(text: "Вставленный текст\nВторая строка",fontSize: 16,color: .black)
+    expect(PDFDocument(data: added)?.page(at: 0)?.string?.contains("Вставленный текст") == true, "native add/paste creates searchable text")
+    expect(PDFDocument(data: added)?.page(at: 0)?.string?.contains("Вторая строка") == true, "multiline content text")
+
+    // Quartz commonly wraps imported PDF pages inside a Form XObject.
+    let wrapped = NSMutableData()
+    let consumer = CGDataConsumer(data: wrapped)!
+    var media = CGRect(x: 0,y: 0,width: 612,height: 792)
+    let context = CGContext(consumer: consumer,mediaBox: &media,nil)!
+    context.beginPDFPage(nil); context.drawPDFPage(PDFDocument(data: data)!.page(at: 0)!.pageRef!); context.endPDFPage(); context.closePDF()
+    let formSession = try PDFSourceSession.editing(data: wrapped as Data,pageIndex: 0,point: CGPoint(x: 100,y: 705))
+    let changedForm = try formSession.applying(text: "Form text replaced",fontSize: 16,color: .black)
+    expect(PDFDocument(data: changedForm)?.page(at: 0)?.string?.contains("Form text replaced") == true, "imported/Form text editing")
+    expect(PDFDocument(data: changedForm)?.page(at: 0)?.string?.contains(original) != true, "imported original text removed")
+    print("PASS: PDFium original text replacement, Cyrillic, deletion, searchable insertion, vector preservation, and imported PDF content")
+}
+
+@MainActor
+private func runTextBlockChecks() throws {
+    func expect(_ condition: @autoclosure () -> Bool, _ message: String) {
+        if !condition() { fatalError("BLOCK CHECK FAILED: \(message)") }
+    }
+    // Deliberately continue BT/ET and its font state across /Contents streams,
+    // as CAD producers do. Also keep a neighboring column and a vector path.
+    let first = "BT /F1 14 Tf 1 0 0 1 72 700 Tm (Fragmented) Tj 1 0 0 1 156 700 Tm (text) Tj\n"
+    let second = "1 0 0 1 72 682 Tm (continues here.) Tj 1 0 0 1 380 700 Tm (Neighbor column) Tj ET\n0 0 0 RG 400 400 40 40 re S\n"
+    let bold = "BT /F1 14 Tf 1 0 0 1 72 500 Tm (Duplicated) Tj 1 0 0 1 72.01 500 Tm (Duplicated) Tj ET\n"
+    let objects = [
+        "<< /Type /Catalog /Pages 2 0 R >>",
+        "<< /Type /Pages /Kids [3 0 R] /Count 1 >>",
+        "<< /Type /Page /Parent 2 0 R /MediaBox [0 0 612 792] /Resources << /Font << /F1 6 0 R >> >> /Contents [4 0 R 5 0 R 7 0 R] >>",
+        "<< /Length \(first.utf8.count) >>\nstream\n"+first+"endstream",
+        "<< /Length \(second.utf8.count) >>\nstream\n"+second+"endstream",
+        "<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica >>",
+        "<< /Length \(bold.utf8.count) >>\nstream\n"+bold+"endstream"
+    ]
+    var data = Data("%PDF-1.7\n".utf8), offsets = [0]
+    for (index,object) in objects.enumerated() {
+        offsets.append(data.count); data.append(Data("\(index+1) 0 obj\n\(object)\nendobj\n".utf8))
+    }
+    let xref = data.count
+    var ending = "xref\n0 \(objects.count+1)\n0000000000 65535 f \n"
+    for offset in offsets.dropFirst() { ending += String(format: "%010lld 00000 n \n",Int64(offset)) }
+    ending += "trailer\n<< /Size \(objects.count+1) /Root 1 0 R >>\nstartxref\n\(xref)\n%%EOF\n"; data.append(Data(ending.utf8))
+    let session = try PDFSourceSession.editing(data: data,pageIndex: 0,point: CGPoint(x: 160,y: 705))
+    expect(session.snapshot.fragmentCount >= 3,"word fragments and the next line belong to one paragraph")
+    expect(session.snapshot.text.contains("Fragmented text continues here."),"complete paragraph reconstruction")
+    expect(!session.snapshot.text.contains("Neighbor"),"adjacent column stays separate")
+    let original = try session.applying(text: session.snapshot.text,fontSize: session.snapshot.fontSize,color: session.snapshot.color)
+    expect(original == data,"no-op leaves the original PDF byte-for-byte unchanged")
+    let editing = try PDFSourceSession.editing(data: data,pageIndex: 0,point: CGPoint(x: 160,y: 705))
+    let replacement = "Fragmented edited text continues here -; Cyrillic: Привет."
+    let changed = try editing.applying(text: replacement,fontSize: 14,color: .black,width: 110)
+    let page = PDFDocument(data: changed)!.page(at: 0)!
+    let text = page.string ?? ""
+    let withoutWhitespace = text.filter { !$0.isWhitespace }
+    expect(withoutWhitespace.contains(replacement.filter { !$0.isWhitespace }),"wrapped paragraph retains every character, punctuation and Cyrillic")
+    expect(text.contains("Neighbor column"),"text in the following content stream survives save/reopen")
+    expect((editing.resultingBounds?.height ?? 0) > editing.snapshot.bounds.height,"block grows vertically instead of clipping new text")
+    let memory = changed as NSData
+    let doc = FPDF_LoadMemDocument64(memory.bytes,memory.length,nil)!, nativePage = FPDF_LoadPage(doc,0)!
+    let paths = (0..<FPDFPage_CountObjects(nativePage)).filter { FPDFPageObj_GetType(FPDFPage_GetObject(nativePage,$0)) == FPDF_PAGEOBJ_PATH }.count
+    expect(paths == 1,"preserves unrelated vector content")
+    FPDF_ClosePage(nativePage); FPDF_CloseDocument(doc)
+    let duplicate = try PDFSourceSession.editing(data: data,pageIndex: 0,point: CGPoint(x: 100,y: 505))
+    expect(duplicate.snapshot.text == "Duplicated","coincident CAD drawing passes become one editable word")
+    let duplicateAfterSave = try PDFSourceSession.editing(data: changed,pageIndex: 0,point: CGPoint(x: 100,y: 505))
+    expect(duplicateAfterSave.snapshot.text == "Duplicated","duplicate detection also works after page regeneration")
+    let invalid = try PDFSourceSession.editing(data: data,pageIndex: 0,point: CGPoint(x: 160,y: 705))
+    do {
+        _ = try invalid.applying(text: "Unsupported 🦄",fontSize: 14,color: .black)
+        fatalError("BLOCK CHECK FAILED: unsupported glyph must be rejected")
+    } catch PDFSourceError.unsupportedGlyph { }
+    print("PASS: paragraph blocks, separate columns, cross-stream text scopes, wrapping, Unicode punctuation, CAD duplicates, and unsupported glyph protection")
 }

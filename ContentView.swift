@@ -11,7 +11,7 @@ private enum BotPlusBrand {
     static let telegramURL = URL(string: "https://t.me/botplus_pdf")!
 }
 
-// Single-file macOS PDF workspace. Replace the template app entry point with this file.
+// Native macOS PDF workspace. Source-content editing is implemented in PDFiumSourceEditor.swift.
 // When App Sandbox is enabled, grant User Selected File Read/Write in Signing & Capabilities.
 
 private struct Bilingual {
@@ -26,15 +26,46 @@ private enum AppLanguage: String, CaseIterable, Identifiable {
     var displayName: String { self == .ru ? "Русский" : "English" }
 }
 
+private enum AppTheme: String, CaseIterable, Identifiable {
+    case dark, light, system
+    var id: String { rawValue }
+    var title: Bilingual {
+        switch self {
+        case .dark: Bilingual(en: "Dark", ru: "Тёмная")
+        case .light: Bilingual(en: "Light", ru: "Светлая")
+        case .system: Bilingual(en: "System", ru: "Системная")
+        }
+    }
+    var colorScheme: ColorScheme? { self == .system ? nil : (self == .dark ? .dark : .light) }
+    var appearance: NSAppearance? { self == .system ? nil : NSAppearance(named: self == .dark ? .darkAqua : .aqua) }
+    @MainActor var isDark: Bool {
+        self == .dark || (self == .system && NSApp.effectiveAppearance.bestMatch(from: [.darkAqua, .aqua]) == .darkAqua)
+    }
+}
 private enum Palette {
-    static let ribbon = Color(red: 0.17, green: 0.17, blue: 0.17)
-    static let raised = Color(red: 0.205, green: 0.205, blue: 0.205)
-    static let separator = Color(red: 0.25, green: 0.25, blue: 0.25)
-    static let selected = Color(red: 0.29, green: 0.29, blue: 0.29)
+    private static func grey(_ dark: CGFloat, _ light: CGFloat) -> Color {
+        Color(nsColor: NSColor(name: nil) { appearance in
+            NSColor(calibratedWhite: appearance.bestMatch(from: [.darkAqua, .aqua]) == .darkAqua ? dark : light, alpha: 1)
+        })
+    }
+    static let ribbon = grey(0.17, 0.95)
+    static let chrome = grey(0.125, 0.91)
+    static let raised = grey(0.205, 0.98)
+    static let panel = grey(0.20, 0.97)
+    static let workspace = grey(0.12, 0.82)
+    static let ruler = grey(0.125, 0.94)
+    static let rulerTicks = grey(0.533, 0.45)
+    static let rulerText = grey(0.8, 0.25)
+    static let separator = grey(0.25, 0.76)
+    static let selected = grey(0.29, 0.83)
     static let file = Color(red: 0.65, green: 0.18, blue: 0.20)
-    static let text = Color(red: 0.88, green: 0.88, blue: 0.88)
-    static let muted = Color(red: 0.68, green: 0.68, blue: 0.68)
-    static let accent = Color(red: 0.30, green: 0.62, blue: 0.90)
+    static let text = grey(0.88, 0.12)
+    static let muted = grey(0.68, 0.40)
+    static let accent = Color(nsColor: NSColor(name: nil) { appearance in
+        appearance.bestMatch(from: [.darkAqua, .aqua]) == .darkAqua
+            ? NSColor(calibratedRed: 0.30, green: 0.62, blue: 0.90, alpha: 1)
+            : NSColor(calibratedRed: 0.10, green: 0.35, blue: 0.72, alpha: 1)
+    })
 }
 
 private enum RibbonTab: CaseIterable, Identifiable {
@@ -60,7 +91,7 @@ private enum RibbonTab: CaseIterable, Identifiable {
 }
 
 private enum PDFTool: Equatable {
-    case hand, textSelection, selectComments, highlight, typewriter, rectangle, line, arrow, callout
+    case hand, textSelection, selectComments, highlight, typewriter, rectangle, line, arrow, callout, addText, editText
     var title: Bilingual {
         switch self {
         case .hand: Bilingual(en: "Hand", ru: "Рука")
@@ -72,6 +103,8 @@ private enum PDFTool: Equatable {
         case .line: Bilingual(en: "Line", ru: "Линия")
         case .arrow: Bilingual(en: "Arrow", ru: "Стрелка")
         case .callout: Bilingual(en: "Callout", ru: "Выноска")
+        case .addText: Bilingual(en: "Add PDF Text", ru: "Добавить текст PDF")
+        case .editText: Bilingual(en: "Edit PDF Text", ru: "Редактировать текст PDF")
         }
     }
 }
@@ -270,14 +303,15 @@ private final class PanelWorkspaceModel: NSObject, ObservableObject, NSWindowDel
         for panel in WorkspacePanel.allCases {
             let config = configuration(for: panel)
             if config.isVisible && config.dock == .floating {
-                if let window = floatingWindows[panel] { window.title = manager.text(panel.title); continue }
+                if let window = floatingWindows[panel] { window.title = manager.text(panel.title); window.appearance = manager.theme.appearance; continue }
                 let window = NSPanel(contentRect: NSRect(x: 0, y: 0, width: config.width, height: 420),
                                      styleMask: [.titled, .closable, .resizable, .utilityWindow], backing: .buffered, defer: false)
                 window.title = manager.text(panel.title)
+                window.appearance = manager.theme.appearance
                 window.isReleasedWhenClosed = false; window.isFloatingPanel = true; window.level = .floating
                 window.minSize = NSSize(width: 200, height: 180); window.maxSize = NSSize(width: 600, height: 1600)
                 window.delegate = self
-                window.contentView = NSHostingView(rootView: FloatingPanelContents(panel: panel, panels: self, manager: manager).preferredColorScheme(.dark))
+                window.contentView = NSHostingView(rootView: FloatingPanelContents(panel: panel, panels: self, manager: manager))
                 window.setFrameAutosaveName("BotPlusPDFEditor.\(panel.rawValue).floating")
                 floatingWindows[panel] = window; window.makeKeyAndOrderFront(nil)
             } else if let window = floatingWindows[panel] {
@@ -302,7 +336,7 @@ private final class PanelWorkspaceModel: NSObject, ObservableObject, NSWindowDel
 private final class PDFDocumentItem: ObservableObject, Identifiable {
     let id = UUID()
     @Published var url: URL
-    let document: PDFDocument
+    @Published var document: PDFDocument
     @Published var pageIndex = 0
     @Published var zoom: CGFloat = 1
 
@@ -317,6 +351,9 @@ private final class DocumentManager: ObservableObject {
     @Published private(set) var documents: [PDFDocumentItem] = []
     @Published var selectedID: UUID?
     @Published var language: AppLanguage = .ru
+    @Published var theme: AppTheme = AppTheme(rawValue: UserDefaults.standard.string(forKey: "BotPlusPDFEditor.theme") ?? "dark") ?? .dark {
+        didSet { UserDefaults.standard.set(theme.rawValue, forKey: "BotPlusPDFEditor.theme") }
+    }
     @Published var tab: RibbonTab = .home
     @Published var tool: PDFTool = .hand
     @Published var layout: PageLayout = .continuous
@@ -337,6 +374,7 @@ private final class DocumentManager: ObservableObject {
     @Published var commandIndex = 0
     @Published var command: ViewerCommand = .refresh
     var rulerMetrics: RulerMetrics { get { viewport.metrics } set { viewport.metrics = newValue } }
+    var finishSourceEditing: (() -> Bool)?
     @Published var isAboutPresented = false
 
     var selected: PDFDocumentItem? { documents.first(where: { $0.id == selectedID }) }
@@ -369,12 +407,14 @@ private final class DocumentManager: ObservableObject {
     }
 
     func select(_ id: UUID) {
+        guard selectedID == id || finishSourceEditing?() != false else { return }
         selectedID = id
         pageText = String((documents.first(where: { $0.id == id })?.pageIndex ?? 0) + 1)
         send(.refresh)
     }
 
     func close(_ id: UUID) {
+        guard selectedID != id || finishSourceEditing?() != false else { return }
         let wasSelected = selectedID == id
         documents.removeAll(where: { $0.id == id })
         if wasSelected {
@@ -398,6 +438,7 @@ private final class DocumentManager: ObservableObject {
     }
 
     func saveDocument() {
+        guard finishSourceEditing?() != false else { return }
         guard let selected else { say("Open a PDF first.", "Сначала откройте PDF-файл."); return }
         AnnotationMetadata.prepareForSave(selected.document)
         let saved = selected.document.write(to: selected.url)
@@ -405,6 +446,7 @@ private final class DocumentManager: ObservableObject {
         guard saved else { say("Could not save the PDF.", "Не удалось сохранить PDF-файл."); return }
     }
     func saveDocumentAs() {
+        guard finishSourceEditing?() != false else { return }
         guard let selected else { say("Open a PDF first.", "Сначала откройте PDF-файл."); return }
         let panel = NSSavePanel()
         panel.allowedContentTypes = [.pdf]
@@ -424,7 +466,7 @@ private final class DocumentManager: ObservableObject {
     func perform(_ action: RibbonAction) {
         if selected == nil {
             switch action {
-            case .open, .settings, .toggleLanguage, .toggleRulers, .panels, .languagePicker, .about, .support, .telegram, .development: break
+            case .open, .settings, .toggleLanguage, .toggleRulers, .panels, .languagePicker, .about, .support, .telegram, .themePicker, .development: break
             default: say("Open a PDF first.", "Сначала откройте PDF-файл."); return
             }
         }
@@ -460,6 +502,11 @@ private final class DocumentManager: ObservableObject {
         case .about: isAboutPresented = true
         case .support: openExternalLink(BotPlusBrand.supportURL)
         case .telegram: openExternalLink(BotPlusBrand.telegramURL)
+        case .themePicker: break
+        case .copy: send(.copy)
+        case .cut: send(.cut)
+        case .paste: send(.paste)
+        case .deleteSelection: send(.deleteSelection)
         case .development: say("Feature in development", "Функция в разработке")
         }
     }
@@ -504,30 +551,35 @@ private enum AnnotationMetadata {
         record.group = group; records.setObject(Box(record), forKey: annotation)
     }
     static func isContainer(_ annotation: PDFAnnotation) -> Bool {
-        annotation.type == "Text" && (annotation.contents ?? "").hasPrefix(prefix)
+        ["Text", "FreeText", "Popup"].contains(annotation.type ?? "") && (annotation.contents ?? "").hasPrefix(prefix)
     }
-    // PDFKit's writer omits custom dictionary keys. A hidden, non-printing Text
+    // PDFKit's writer omits custom dictionary keys. A hidden, non-printing FreeText
     // annotation carries editor settings while standard visible annotations stay editable.
     static func prepareForSave(_ document: PDFDocument) {
         for index in 0..<document.pageCount {
             guard let page = document.page(at: index) else { continue }
-            for annotation in page.annotations where isContainer(annotation) { page.removeAnnotation(annotation) }
+            for annotation in page.annotations where isContainer(annotation) { removeContainer(annotation, from: page) }
             let entries = page.annotations.enumerated().compactMap { index, annotation -> Entry? in
                 guard let record = records.object(forKey: annotation)?.record else { return nil }
                 return Entry(index: index, subtype: annotation.type ?? "", center: CGPoint(x: annotation.bounds.midX, y: annotation.bounds.midY), record: record)
             }
             guard !entries.isEmpty, let data = try? JSONEncoder().encode(entries) else { continue }
-            let marker = PDFAnnotation(bounds: CGRect(x: page.bounds(for: .cropBox).minX, y: page.bounds(for: .cropBox).minY, width: 1, height: 1), forType: .text, withProperties: nil)
+            let marker = PDFAnnotation(bounds: CGRect(x: page.bounds(for: .cropBox).minX, y: page.bounds(for: .cropBox).minY, width: 1, height: 1), forType: .freeText, withProperties: nil)
             marker.contents = prefix + data.base64EncodedString()
             marker.shouldDisplay = false; marker.shouldPrint = false
             marker.userName = BotPlusBrand.name
             page.addAnnotation(marker)
         }
     }
+    private static func removeContainer(_ marker: PDFAnnotation, from page: PDFPage) {
+        if let popup = marker.popup { page.removeAnnotation(popup) }
+        marker.popup = nil
+        page.removeAnnotation(marker)
+    }
     static func removeContainers(_ document: PDFDocument) {
         for index in 0..<document.pageCount {
             guard let page = document.page(at: index) else { continue }
-            for annotation in page.annotations where isContainer(annotation) { page.removeAnnotation(annotation) }
+            for annotation in page.annotations where isContainer(annotation) { removeContainer(annotation, from: page) }
         }
     }
     static func restore(_ document: PDFDocument) {
@@ -536,7 +588,7 @@ private enum AnnotationMetadata {
             let annotations = page.annotations.filter { !isContainer($0) }
             let containers = page.annotations.filter(isContainer)
             var used = Set<Int>()
-            for marker in containers {
+            for marker in containers where marker.type != "Popup" {
                 guard let contents = marker.contents,
                       let data = Data(base64Encoded: String(contents.dropFirst(prefix.count))),
                       let entries = try? JSONDecoder().decode([Entry].self, from: data) else { continue }
@@ -555,37 +607,40 @@ private enum AnnotationMetadata {
                         annotation.fontColor = (annotation.fontColor ?? .black).withAlphaComponent(CGFloat(entry.record.opacity))
                     } else { annotation.color = annotation.color.withAlphaComponent(CGFloat(entry.record.opacity)) }
                 }
-                page.removeAnnotation(marker)
             }
+            for marker in containers { removeContainer(marker, from: page) }
         }
     }
-    static func copy(from source: PDFPage, to destination: PDFPage) {
-        let old = source.annotations.filter { !isContainer($0) }
-        for marker in destination.annotations where isContainer(marker) { destination.removeAnnotation(marker) }
-        let new = destination.annotations
+    static func transfer(from originals: [PDFAnnotation], to copies: [PDFAnnotation]) {
         var groups: [String: String] = [:]
-        for (original, duplicate) in zip(old, new) {
+        for (original, duplicate) in zip(originals, copies) {
             guard var record = records.object(forKey: original)?.record else { continue }
             record.id = UUID().uuidString
             if let group = record.group {
-                let copiedGroup = groups[group] ?? UUID().uuidString
-                groups[group] = copiedGroup; record.group = copiedGroup
+                let copied = groups[group] ?? UUID().uuidString; groups[group] = copied; record.group = copied
             }
             records.setObject(Box(record), forKey: duplicate)
         }
     }
+    static func copy(from source: PDFPage, to destination: PDFPage) {
+        let old = source.annotations.filter { !isContainer($0) }
+        for marker in destination.annotations where isContainer(marker) { removeContainer(marker, from: destination) }
+        transfer(from: old, to: destination.annotations)
+    }
+
 }
 
 private enum ViewerCommand: Equatable {
     case refresh, zoomIn, zoomOut, actualSize, fitPage, fitWidth, rotate(Int), page(Int), highlight, underline, insertBlankPage, deletePage, duplicatePage, print, applyAnnotationStyle
     case setZoom(CGFloat)
+    case copy, cut, paste, deleteSelection
 }
 
 private enum RibbonAction {
     case open, save, saveAs, close, print, settings
     case tool(PDFTool), layout(PageLayout), zoomIn, zoomOut, actualSize, fitPage, fitWidth
     case rotateLeft, rotateRight, previous, next, first, last, highlight, toggleLanguage, toggleRulers
-    case panels, languagePicker, about, support, telegram, underline, insertBlankPage, deletePage, duplicatePage, development
+    case panels, languagePicker, themePicker, about, support, telegram, underline, insertBlankPage, deletePage, duplicatePage, copy, cut, paste, deleteSelection, development
 }
 
 private struct RibbonCommand: Identifiable {
@@ -611,7 +666,7 @@ private struct RibbonGroupSpec: Identifiable {
 struct BotPlusPDFEditorApp: App {
     var body: some Scene {
         WindowGroup(BotPlusBrand.name) {
-            ContentView().frame(minWidth: 1060, minHeight: 700).preferredColorScheme(.dark)
+            ContentView().frame(minWidth: 1060, minHeight: 700)
         }
         .windowStyle(.hiddenTitleBar)
         .commands {
@@ -641,8 +696,9 @@ private struct ContentView: View {
         }
         .background(Palette.ribbon)
         .background(WindowTitleSynchronizer(title: manager.title).frame(width: 0, height: 0))
-        .background(WindowChromeConfigurator().frame(width: 0, height: 0))
+        .background(WindowChromeConfigurator(theme: manager.theme).frame(width: 0, height: 0))
         .foregroundStyle(Palette.text)
+        .preferredColorScheme(manager.theme.colorScheme)
         .ignoresSafeArea(.container, edges: .top)
         .onReceive(NotificationCenter.default.publisher(for: .requestOpenPDF)) { _ in manager.openPanel() }
         .onReceive(manager.panels.$configurations) { _ in
@@ -652,6 +708,7 @@ private struct ContentView: View {
             }
         }
         .onChange(of: manager.language) { _, _ in manager.panels.synchronizeFloatingWindows(manager: manager) }
+        .onChange(of: manager.theme) { _, _ in manager.panels.synchronizeFloatingWindows(manager: manager) }
         .sheet(isPresented: $manager.isAboutPresented) { AboutDialog(manager: manager) }
         .alert(manager.language == .ru ? "Сообщение" : "Notice", isPresented: Binding(
             get: { manager.notice != nil }, set: { if !$0 { manager.notice = nil } }
@@ -686,21 +743,26 @@ private struct WindowTitleSynchronizer: NSViewRepresentable {
 }
 
 private struct WindowChromeConfigurator: NSViewRepresentable {
-    func makeNSView(context: Context) -> WindowChromeView { WindowChromeView(frame: .zero) }
-    func updateNSView(_ view: WindowChromeView, context: Context) { view.configureWindow() }
+    let theme: AppTheme
+    func makeNSView(context: Context) -> WindowChromeView {
+        let view = WindowChromeView(frame: .zero); view.theme = theme; return view
+    }
+    func updateNSView(_ view: WindowChromeView, context: Context) { view.theme = theme; view.configureWindow() }
 
     @MainActor
     final class WindowChromeView: NSView {
+        var theme: AppTheme = .dark
         override func viewDidMoveToWindow() {
             super.viewDidMoveToWindow()
             configureWindow()
         }
         func configureWindow() {
             guard let window else { return }
+            window.appearance = theme.appearance
             window.titleVisibility = .hidden
             window.titlebarAppearsTransparent = true
             window.styleMask.insert(.fullSizeContentView)
-            window.backgroundColor = NSColor(calibratedRed: 0.125, green: 0.125, blue: 0.125, alpha: 1)
+            window.backgroundColor = NSColor(calibratedWhite: theme.isDark ? 0.125 : 0.91, alpha: 1)
         }
     }
 }
@@ -765,7 +827,7 @@ private struct AboutDialog: View {
                 .keyboardShortcut(.defaultAction)
         }
         .padding(26).frame(width: 360).background(Palette.ribbon)
-        .preferredColorScheme(.dark)
+        .preferredColorScheme(manager.theme.colorScheme)
     }
 }
 
@@ -778,7 +840,7 @@ private struct QuickBar: View {
                 Color.clear.frame(width: 78, height: 1)
                 AppIconPreviewView().frame(width: 22, height: 22).clipShape(RoundedRectangle(cornerRadius: 4)).padding(.horizontal, 2)
                 quick("Open", "Открыть", "folder", .open)
-                quick("Save", "Сохранить", "square.and.arrow.down", .save)
+                quick("Save", "Сохранить", "botplus.floppy", .save)
                 quick("Print", "Печать", "printer", .print)
                 Hairline(height: 20)
                 QuickIcon("Undo", "Отменить", "arrow.uturn.backward", language: manager.language) { manager.perform(.development) }
@@ -793,7 +855,7 @@ private struct QuickBar: View {
                 }.padding(.horizontal, 8).frame(height: 25).background(Palette.raised, in: RoundedRectangle(cornerRadius: 4)).padding(.trailing, 10)
             }
         }
-        .frame(height: 40).background(Color(red: 0.125, green: 0.125, blue: 0.125))
+        .frame(height: 40).background(Palette.chrome)
         .overlay(alignment: .bottom) { Palette.separator.frame(height: 1) }
     }
 
@@ -809,8 +871,25 @@ private struct QuickIcon: View {
         self.en = en; self.ru = ru; self.symbol = symbol; self.language = language; self.action = action
     }
     var body: some View {
-        Button(action: action) { Image(systemName: symbol).font(.system(size: 12)).frame(width: 24, height: 24) }
+        Button(action: action) {
+            Group {
+                if symbol == "botplus.floppy" { FloppyDiskSymbol().stroke(style: StrokeStyle(lineWidth: 1.3, lineJoin: .round)).frame(width: 14, height: 14) }
+                else { Image(systemName: symbol).font(.system(size: 12)) }
+            }.frame(width: 24, height: 24)
+        }
             .buttonStyle(.plain).foregroundStyle(Palette.text).help(language == .ru ? ru : en)
+    }
+}
+
+private struct FloppyDiskSymbol: Shape {
+    func path(in rect: CGRect) -> Path {
+        let x = rect.width / 16, y = rect.height / 16
+        func point(_ px: CGFloat, _ py: CGFloat) -> CGPoint { CGPoint(x: rect.minX + px * x, y: rect.minY + py * y) }
+        var path = Path(); path.move(to: point(1, 1)); path.addLine(to: point(11, 1))
+        path.addLine(to: point(15, 5)); path.addLine(to: point(15, 15)); path.addLine(to: point(1, 15)); path.closeSubpath()
+        path.addRect(CGRect(x: rect.minX + 4*x, y: rect.minY + y, width: 6*x, height: 5*y))
+        path.addRect(CGRect(x: rect.minX + 4*x, y: rect.minY + 9*y, width: 8*x, height: 6*y))
+        return path
     }
 }
 
@@ -854,7 +933,7 @@ private struct RibbonView: View {
         switch tab {
         case .file:
             return [RibbonGroupSpec("file", "Document", "Документ", [
-                RibbonCommand("open", "Open", "Открыть", "folder", .open), RibbonCommand("save", "Save", "Сохранить", "square.and.arrow.down", .save),
+                RibbonCommand("open", "Open", "Открыть", "folder", .open), RibbonCommand("save", "Save", "Сохранить", "botplus.floppy", .save),
                 RibbonCommand("saveAs", "Save As", "Сохранить как", "square.and.arrow.up", .saveAs), RibbonCommand("close", "Close", "Закрыть", "xmark", .close),
                 RibbonCommand("print", "Print", "Печать", "printer", .print), RibbonCommand("settings", "Settings", "Настройки", "gearshape", .settings)
             ])]
@@ -862,7 +941,7 @@ private struct RibbonView: View {
             return [
                 RibbonGroupSpec("tools", "Tools", "Инструменты", [tool("hand", "Hand", "Рука", "hand.raised", .hand), tool("text", "Select Text", "Выделить текст", "text.cursor", .textSelection), tool("selectComments", "Select Comments", "Выделить комментарии", "cursorarrow", .selectComments)]),
                 RibbonGroupSpec("view", "View", "Вид", [RibbonCommand("zoomOut", "Zoom Out", "Уменьшить", "minus.magnifyingglass", .zoomOut), RibbonCommand("actual", "Actual Size 1:1", "Реальный размер 1:1", "1.magnifyingglass", .actualSize), RibbonCommand("zoomIn", "Zoom In", "Увеличить", "plus.magnifyingglass", .zoomIn), RibbonCommand("fitWidth", "Fit Width", "По ширине", "arrow.left.and.right", .fitWidth), RibbonCommand("rotateLeft", "Rotate 90° CCW", "Повернуть на 90° влево", "rotate.left", .rotateLeft), RibbonCommand("rotateRight", "Rotate 90° CW", "Повернуть на 90° вправо", "rotate.right", .rotateRight)]),
-                RibbonGroupSpec("objects", "Objects", "Объекты", [cmd("editText", "Edit Text", "Редактировать текст", "character.cursor.ibeam"), cmd("editContent", "Edit Content", "Редактировать содержимое", "square.and.pencil"), cmd("addImage", "Add Image", "Добавить изображение", "photo.badge.plus")]),
+                RibbonGroupSpec("objects", "Objects", "Объекты", [tool("addText", "Add Text", "Добавить текст", "text.badge.plus", .addText), tool("editText", "Edit PDF Text", "Редактировать текст", "character.cursor.ibeam", .editText), RibbonCommand("pasteObject", "Paste", "Вставить", "doc.on.clipboard", .paste), RibbonCommand("copyObject", "Copy", "Копировать", "doc.on.doc", .copy), RibbonCommand("cutObject", "Cut", "Вырезать", "scissors", .cut), RibbonCommand("deleteObject", "Delete", "Удалить", "trash", .deleteSelection), cmd("addImage", "Add Image", "Добавить изображение", "photo.badge.plus")]),
                 RibbonGroupSpec("comment", "Comment", "Комментарий", [tool("typewriter", "Typewriter", "Печатная машинка", "character.cursor.ibeam", .typewriter), RibbonCommand("highlight", "Highlight Text", "Подсветить текст", "highlighter", .highlight), RibbonCommand("underline", "Underline", "Подчёркивание", "underline", .underline), cmd("stamp", "Stamp", "Штамп", "seal"), cmd("sticky", "Sticky Note", "Заметка", "note.text")]),
                 RibbonGroupSpec("links", "Links", "Ссылки", [cmd("addLink", "Add Link", "Добавить ссылку", "link"), cmd("editLink", "Edit Links", "Изменить ссылки", "link.badge.plus")]),
                 RibbonGroupSpec("security", "Security", "Защита", [cmd("sign", "Sign Document", "Подписать документ", "signature"), cmd("protect", "Protect", "Защитить", "lock.shield")])
@@ -926,7 +1005,7 @@ private struct RibbonView: View {
                     RibbonGroupSpec("modify", "Modify", "Изменить", [cmd("bookmarkAddText", "Add Text", "Добавить текст", "text.badge.plus"), cmd("bookmarkCase", "Change Case", "Изменить регистр", "textformat"), cmd("bookmarkZoom", "Change Zoom", "Изменить масштаб", "magnifyingglass"), cmd("bookmarkDestination", "Named Destination to Link", "Имен. назначение в ссылку", "link"), cmd("bookmarkFind", "Find & Replace", "Найти и заменить", "text.magnifyingglass"), cmd("bookmarkActions", "Delete Actions", "Удалить действия", "trash"), cmd("bookmarkSort", "Sort", "Сортировать", "arrow.up.arrow.down"), cmd("bookmarkValidate", "Validate", "Утвердить", "checkmark.seal"), cmd("bookmarkMerge", "Merge Duplicates", "Объединить дубликаты", "arrow.triangle.merge")]),
                     RibbonGroupSpec("convert", "Convert", "Преобразовать", [cmd("bookmarkTOC", "Create Table of Contents", "Создать Содержание", "list.bullet.indent"), cmd("bookmarkLinks", "Link for Bookmarks", "Ссылка для закладок", "link.badge.plus"), cmd("bookmarkSortPages", "Sort Pages", "Сортировка страниц", "doc.text.magnifyingglass"), cmd("bookmarkNamed", "Convert to Named Destinations", "Преобр. в им. назначения", "bookmark.fill"), cmd("bookmarkHTML", "Export to HTML", "Экспорт в HTML", "chevron.left.forwardslash.chevron.right"), cmd("bookmarkText", "Export to Text File", "Экспортировать в текстовый файл", "doc.text")])]
         case .help:
-            return [RibbonGroupSpec("ui", "UI Settings", "Настройки интерфейса", [cmd("theme", "Theme", "Тема", "circle.lefthalf.filled"), cmd("customize", "Customize Ribbon", "Настроить ленту", "slider.horizontal.3"), RibbonCommand("language", "Language", "Язык", "globe", .languagePicker)]),
+            return [RibbonGroupSpec("ui", "UI Settings", "Настройки интерфейса", [RibbonCommand("theme", "Theme", "Тема", "circle.lefthalf.filled", .themePicker), cmd("customize", "Customize Ribbon", "Настроить ленту", "slider.horizontal.3"), RibbonCommand("language", "Language", "Язык", "globe", .languagePicker)]),
                     RibbonGroupSpec("help", "Contact", "Контакты", [RibbonCommand("support", "Support", "Поддержка", "person.crop.circle.badge.questionmark", .support), RibbonCommand("telegram", "Telegram", "Телеграм", "paperplane", .telegram)]),
                     RibbonGroupSpec("product", "Product", "Программа", [RibbonCommand("about", "About", "О программе", "info.circle", .about), cmd("updates", "Check Updates", "Проверить обновления", "arrow.clockwise"), cmd("license", "License", "Лицензия", "key")])]
         }
@@ -950,6 +1029,7 @@ private struct RibbonGroupView: View {
                         switch command.action {
                         case .panels: PanelsMenuButton(manager: manager, command: command)
                         case .languagePicker: LanguageMenuButton(manager: manager, command: command)
+                        case .themePicker: ThemeMenuButton(manager: manager, command: command)
                         default:
                             Button { manager.perform(command.action) } label: {
                                 commandLabel(command, manager: manager)
@@ -972,7 +1052,10 @@ private func commandLabel(_ command: RibbonCommand, manager: DocumentManager) ->
     else if case .tool(let tool) = command.action { selected = manager.tool == tool }
     else { selected = false }
     return VStack(spacing: 5) {
-        Image(systemName: command.symbol).font(.system(size: 20, weight: .regular)).frame(height: 24)
+        Group {
+            if command.symbol == "botplus.floppy" { FloppyDiskSymbol().stroke(style: StrokeStyle(lineWidth: 1.7, lineJoin: .round)).frame(width: 22, height: 22) }
+            else { Image(systemName: command.symbol).font(.system(size: 20, weight: .regular)) }
+        }.frame(height: 24)
         Text(manager.text(command.title)).font(.system(size: 9)).lineLimit(2).multilineTextAlignment(.center).minimumScaleFactor(0.75).frame(height: 23)
     }
     .foregroundStyle(selected ? Palette.accent : Palette.text)
@@ -996,6 +1079,22 @@ private struct PanelsMenuButton: View {
             }
         } label: { commandLabel(command, manager: manager) }
             .menuStyle(.borderlessButton).help(manager.text(command.title))
+    }
+}
+
+private struct ThemeMenuButton: View {
+    @ObservedObject var manager: DocumentManager
+    let command: RibbonCommand
+    var body: some View {
+        Menu {
+            ForEach(AppTheme.allCases) { theme in
+                Button { manager.theme = theme } label: {
+                    if manager.theme == theme { Label(manager.text(theme.title), systemImage: "checkmark") }
+                    else { Text(manager.text(theme.title)) }
+                }
+            }
+        } label: { commandLabel(command, manager: manager) }
+        .menuStyle(.borderlessButton).help(manager.text(command.title))
     }
 }
 
@@ -1081,7 +1180,7 @@ private struct WorkspaceArea: View {
                     Menu {
                         ForEach(RulerUnit.allCases) { unit in Button(unit.rawValue) { manager.rulerUnit = unit } }
                     } label: { Text(manager.rulerUnit.rawValue).font(.system(size: 8)) }
-                    .menuStyle(.borderlessButton).frame(width: 30, height: 25).background(Color(white: 0.125))
+                    .menuStyle(.borderlessButton).frame(width: 30, height: 25).background(Palette.ruler)
                     RulerBar(axis: .horizontal, manager: manager).frame(height: 25)
                 }
             }
@@ -1089,7 +1188,7 @@ private struct WorkspaceArea: View {
                 if manager.rulersVisible { RulerBar(axis: .vertical, manager: manager).frame(width: 30) }
                 PDFViewer(manager: manager).frame(maxWidth: .infinity, maxHeight: .infinity)
             }
-        }.background(Color(white: 0.12)).frame(minWidth: 180)
+        }.background(Palette.workspace).frame(minWidth: 180)
     }
 }
 private struct PanelIconStrip: View {
@@ -1130,7 +1229,7 @@ private struct DockedPanelContainer: View {
                 VStack(spacing: 0) {
                     PanelHeader(panel: panel, manager: manager)
                     PanelBody(panel: panel, manager: manager)
-                }.frame(width: width).frame(maxHeight: .infinity).background(Color(white: 0.20))
+                }.frame(width: width).frame(maxHeight: .infinity).background(Palette.panel)
                 if side == .left { PanelResizeHandle(panel: panel, manager: manager, direction: 1, initialWidth: width) }
             }
         }
@@ -1333,6 +1432,7 @@ private struct FloatingPanelContents: View {
             PanelHeader(panel: panel, manager: manager)
             PanelBody(panel: panel, manager: manager)
         }.frame(minWidth: 200, minHeight: 180)
+            .background(Palette.panel).foregroundStyle(Palette.text).preferredColorScheme(manager.theme.colorScheme)
     }
 }
 
@@ -1398,7 +1498,7 @@ private struct RulerBar: View {
     init(axis: RulerAxis, manager: DocumentManager) { self.axis = axis; self.manager = manager; self.viewport = manager.viewport }
     var body: some View {
         Canvas { context, size in
-            context.fill(Path(CGRect(origin: .zero, size: size)), with: .color(Color(white: 0.125)))
+            context.fill(Path(CGRect(origin: .zero, size: size)), with: .color(Palette.ruler))
             let metrics = manager.rulerMetrics
             guard metrics.valid else { return }
             let horizontal = axis == .horizontal
@@ -1420,10 +1520,10 @@ private struct RulerBar: View {
                     var tick = Path()
                     if horizontal { tick.move(to: CGPoint(x: pixel, y: size.height)); tick.addLine(to: CGPoint(x: pixel, y: size.height - tickLength)) }
                     else { tick.move(to: CGPoint(x: size.width, y: pixel)); tick.addLine(to: CGPoint(x: size.width - tickLength, y: pixel)) }
-                    context.stroke(tick, with: .color(Color(white: 0.533)), lineWidth: 1)
+                    context.stroke(tick, with: .color(Palette.rulerTicks), lineWidth: 1)
                     if majorTick {
                         let digits = major >= 1 ? 0 : (major >= 0.1 ? 1 : 2)
-                        let label = Text(String(format: "%.*f", digits, abs(value) < minor / 2 ? 0 : value)).font(.system(size: 8)).foregroundColor(Color(white: 0.8))
+                        let label = Text(String(format: "%.*f", digits, abs(value) < minor / 2 ? 0 : value)).font(.system(size: 8)).foregroundColor(Palette.rulerText)
                         if horizontal { context.draw(label, at: CGPoint(x: pixel + 3, y: 2), anchor: .topLeading) }
                         else {
                             var rotated = context; rotated.translateBy(x: 8, y: pixel + 3); rotated.rotate(by: .degrees(90))
@@ -1450,6 +1550,26 @@ private func rulerInterval(for target: CGFloat) -> CGFloat {
         return CGFloat(multiplier * power)
     }
     return CGFloat(10 * power)
+}
+
+private enum ObjectClipboard {
+    static let annotations = NSPasteboard.PasteboardType("com.botplus.pdfeditor.annotation-objects")
+    static let sourceText = NSPasteboard.PasteboardType("com.botplus.pdfeditor.source-text")
+    struct TextStyle: Codable {
+        let text: String
+        let fontSize: Double
+        let fontName: String
+        let rgba: [Double]
+        init(text: String, size: CGFloat, name: String, color: NSColor) {
+            self.text = text; fontSize = Double(size); fontName = name
+            let c = color.usingColorSpace(.deviceRGB) ?? .black
+            rgba = [Double(c.redComponent), Double(c.greenComponent), Double(c.blueComponent), Double(c.alphaComponent)]
+        }
+        var color: NSColor {
+            guard rgba.count == 4 else { return .black }
+            return NSColor(calibratedRed: min(1,max(0,rgba[0])), green: min(1,max(0,rgba[1])), blue: min(1,max(0,rgba[2])), alpha: min(1,max(0,rgba[3])))
+        }
+    }
 }
 
 private struct PDFViewer: NSViewRepresentable {
@@ -1497,14 +1617,28 @@ private struct PDFViewer: NSViewRepresentable {
         weak var observedClip: NSClipView?
         var syncScheduled = false
         var textPopover: NSPopover?
+        var sourcePopover: NSPopover?
+        var sourceAnchor: (index: Int, point: CGPoint)?
         var lastSearchText = ""
 
         init(manager: DocumentManager) { self.manager = manager }
         func attach(_ view: PDFViewerView) {
             self.view = view; view.delegate = self
+            manager.finishSourceEditing = { [weak self] in self?.finishSourceEditor() ?? true }
             view.onCreateText = { [weak self, weak view] page, point, leader in
                 guard let self, let view else { return }
                 self.createFreeText(on: page, at: point, in: view, leader: leader)
+            }
+            view.onSourceTextRequest = { [weak self, weak view] page, point, adding, activate in
+                Task { @MainActor [weak self, weak view] in
+                    await Task.yield()
+                    guard let self, let view else { return }
+                    self.openSourceEditor(on: page, point: point, adding: adding, activating: activate, view: view)
+                }
+            }
+            view.onClipboardCommand = { [weak self, weak view] command in
+                guard let self, let view else { return }
+                self.perform(command, on: view)
             }
             view.onEditText = { [weak self, weak view] annotation in
                 guard let self, let view, let page = annotation.page else { return }
@@ -1538,11 +1672,13 @@ private struct PDFViewer: NSViewRepresentable {
             }
         }
         func detach() {
+            manager.finishSourceEditing = nil
             for token in observationTokens { NotificationCenter.default.removeObserver(token) }
             observationTokens.removeAll()
             if let clipToken { NotificationCenter.default.removeObserver(clipToken) }
             clipToken = nil; observedClip = nil
             textPopover?.close(); textPopover = nil
+            sourcePopover?.close(); sourcePopover = nil
         }
         private func observeScroll(in view: PDFViewerView) {
             guard let clip = view.internalScrollView?.contentView, clip !== observedClip else { return }
@@ -1557,10 +1693,12 @@ private struct PDFViewer: NSViewRepresentable {
         }
 
         func update(_ view: PDFViewerView) {
-            if activeDocumentID != manager.selected?.id {
+            if activeDocumentID != manager.selected?.id || view.document !== manager.selected?.document {
                 activeDocumentID = manager.selected?.id
                 lastSearchText = ""
                 if let popover = textPopover { Task { @MainActor in popover.close() } }
+                if let popover = sourcePopover { Task { @MainActor in popover.close() } }
+                view.setSourceSelection(nil)
                 view.selectAnnotation(nil)
                 view.document = manager.selected?.document
                 if let item = manager.selected {
@@ -1571,6 +1709,7 @@ private struct PDFViewer: NSViewRepresentable {
             if view.displayMode != manager.layout.pdfMode { view.displayMode = manager.layout.pdfMode }
             if view.displaysAsBook != (manager.layout == .spread) { view.displaysAsBook = manager.layout == .spread }
             view.activeTool = manager.tool
+            view.backgroundColor = NSColor(calibratedWhite: manager.theme.isDark ? 0.12 : 0.82, alpha: 1)
             view.strokeColor = NSColor(manager.annotationColor).withAlphaComponent(CGFloat(manager.annotationOpacity))
             view.strokeWidth = CGFloat(manager.annotationStrokeWidth)
             view.refreshOverlay()
@@ -1597,6 +1736,10 @@ private struct PDFViewer: NSViewRepresentable {
         private func perform(_ command: ViewerCommand, on view: PDFViewerView) {
             guard let item = manager.selected, view.document === item.document else { return }
             switch command {
+            case .copy: copyObjects(on: view, cutting: false)
+            case .cut: copyObjects(on: view, cutting: true)
+            case .paste: pasteObjects(on: view)
+            case .deleteSelection: deleteObjects(on: view)
             case .refresh: break
             case .zoomIn: view.autoScales = false; view.scaleFactor = min(view.maxScaleFactor, view.scaleFactor * 1.2)
             case .zoomOut: view.autoScales = false; view.scaleFactor = max(view.minScaleFactor, view.scaleFactor / 1.2)
@@ -1660,6 +1803,207 @@ private struct PDFViewer: NSViewRepresentable {
                 view.scaleFactor = max(view.minScaleFactor, min(view.maxScaleFactor, zoom))
             }
             scheduleViewportSync(for: view)
+        }
+
+        private func sourceData(_ item: PDFDocumentItem) throws -> Data {
+            guard item.document.allowsDocumentChanges else { throw PDFSourceError.permission }
+            AnnotationMetadata.prepareForSave(item.document)
+            defer { AnnotationMetadata.removeContainers(item.document) }
+            guard let data = item.document.dataRepresentation() else { throw PDFSourceError.document }
+            return data
+        }
+        private func sourceError(_ error: Error) {
+            if let error = error as? PDFSourceError { manager.say(error.english, error.russian) }
+            else { manager.say("Could not modify the PDF text.", "Не удалось изменить текст PDF.") }
+        }
+        private func installSourceData(_ data: Data, item: PDFDocumentItem, index: Int, view: PDFViewerView, bounds: CGRect?) throws {
+            guard let document = PDFDocument(data: data), document.pageCount == item.pageCount else { throw PDFSourceError.save }
+            AnnotationMetadata.restore(document)
+            item.document = document; item.pageIndex = index
+            reload(view, document: item, pageIndex: index)
+            if let bounds, let page = document.page(at: index) {
+                view.setSourceSelection((page, bounds)); sourceAnchor = (index, CGPoint(x: bounds.midX, y: bounds.midY))
+            } else { view.setSourceSelection(nil); sourceAnchor = nil }
+            manager.pageText = String(index + 1); manager.send(.refresh)
+        }
+        private func finishSourceEditor() -> Bool {
+            guard let popover = sourcePopover else { return true }
+            if let controller = popover.contentViewController as? PDFSourceEditorController,
+               !controller.popoverShouldClose(popover) { return false }
+            popover.close(); sourcePopover = nil; return true
+        }
+        private func openSourceEditor(on page: PDFPage, point: CGPoint, adding: Bool, activating: Bool = true, view: PDFViewerView) {
+            guard let item = manager.selected, item.document === view.document else { return }
+            do {
+                let index = item.document.index(for: page)
+                guard finishSourceEditor() else { return }
+                guard let targetPage = item.document.page(at: index) else { throw PDFSourceError.page }
+                let data = try sourceData(item)
+                let session = try adding
+                    ? PDFSourceSession.adding(data: data, pageIndex: index, point: point, fontSize: CGFloat(manager.textFontSize), color: NSColor(manager.annotationColor))
+                    : PDFSourceSession.editing(data: data, pageIndex: index, point: point)
+                view.selectAnnotation(nil); view.setSourceSelection((targetPage, session.snapshot.bounds))
+                sourceAnchor = (index, point)
+                guard activating else { return }
+                let expectedDocument = item.document
+                let controller = PDFSourceEditorController(snapshot: session.snapshot, language: manager.language)
+                let popover = NSPopover(); popover.behavior = .transient; popover.contentSize = NSSize(width: 430, height: 285)
+                controller.popover = popover; popover.delegate = controller; popover.contentViewController = controller
+                controller.onFinish = { [weak self, weak view, weak item] cancelled, text, size, color, width in
+                    guard let self, let view, let item else { return true }
+                    guard self.manager.selected?.id == item.id, item.document === expectedDocument else { return true }
+                    if cancelled {
+                        self.sourcePopover = nil
+                        if adding { view.setSourceSelection(nil); self.sourceAnchor = nil }
+                        return true
+                    }
+                    let sameColor = color.isEqual(session.snapshot.color)
+                    if !adding && text == session.snapshot.text && abs(size-session.snapshot.fontSize) < 0.01 && sameColor && abs(width-session.snapshot.width) < 0.01 {
+                        self.sourcePopover = nil; return true
+                    }
+                    do {
+                        // Recreate from the immutable snapshot on every attempt;
+                        // failed font/content validation keeps the editor and draft open.
+                        let committing = try adding
+                            ? PDFSourceSession.adding(data: data,pageIndex: index,point: point,fontSize: session.snapshot.fontSize,color: session.snapshot.color)
+                            : PDFSourceSession.editing(data: data,pageIndex: index,point: point)
+                        let changed = try committing.applying(text: text,fontSize: size,color: color,width: width)
+                        try self.installSourceData(changed,item: item,index: index,view: view,bounds: committing.resultingBounds)
+                        self.sourcePopover = nil
+                        return true
+                    } catch { self.sourceError(error); return false }
+                }
+                sourcePopover = popover
+                let anchor = view.convert(session.snapshot.bounds, from: targetPage).intersection(view.bounds)
+                popover.show(relativeTo: anchor.isEmpty ? CGRect(x: view.bounds.midX,y: view.bounds.midY,width: 1,height: 1) : anchor, of: view, preferredEdge: .maxY)
+                popover.contentViewController?.view.window?.makeFirstResponder(controller.editor)
+            } catch { sourceError(error) }
+        }
+        private func annotationComponents(_ annotation: PDFAnnotation) -> [PDFAnnotation] {
+            if let group = AnnotationMetadata.group(of: annotation), let page = annotation.page {
+                return page.annotations.filter { AnnotationMetadata.group(of: $0) == group }
+            }
+            return [annotation]
+        }
+        private func annotationClipboardData(_ annotation: PDFAnnotation) -> Data? {
+            guard let page = annotation.page else { return nil }
+            let components = annotationComponents(annotation)
+            let clipboardPage = PDFPage(); clipboardPage.setBounds(page.bounds(for: .mediaBox), for: .mediaBox)
+            clipboardPage.setBounds(page.bounds(for: .cropBox), for: .cropBox)
+            let copies = components.compactMap { $0.copy() as? PDFAnnotation }
+            guard copies.count == components.count else { return nil }
+            for copy in copies { copy.page = nil; clipboardPage.addAnnotation(copy) }
+            AnnotationMetadata.transfer(from: components, to: copies)
+            let document = PDFDocument(); document.insert(clipboardPage, at: 0)
+            AnnotationMetadata.prepareForSave(document)
+            guard let data = document.dataRepresentation() else { return nil }
+            return data
+        }
+        private func copyAnnotationObjects(_ annotation: PDFAnnotation, board: NSPasteboard = .general) -> Bool {
+            guard let data = annotationClipboardData(annotation) else { return false }
+            board.clearContents()
+            let success = board.setData(data, forType: ObjectClipboard.annotations)
+            _ = board.setData(data, forType: .pdf)
+            if let text = annotation.contents { _ = board.setString(text, forType: .string) }
+            return success
+        }
+        private func sourceSessionForSelection(view: PDFViewerView) throws -> (PDFSourceSession, PDFDocumentItem, Int, String?) {
+            guard let item = manager.selected else { throw PDFSourceError.document }
+            if let sourceAnchor, view.sourceSelection != nil {
+                return (try PDFSourceSession.editing(data: sourceData(item), pageIndex: sourceAnchor.index, point: sourceAnchor.point), item, sourceAnchor.index, nil)
+            }
+            if let selection = view.currentSelection, let page = selection.pages.first, selection.pages.count == 1,
+               let text = selection.string, !text.isEmpty {
+                let bounds = selection.bounds(for: page), index = item.document.index(for: page)
+                return (try PDFSourceSession.editing(data: sourceData(item), pageIndex: index, point: CGPoint(x: bounds.midX,y: bounds.midY)), item, index, text)
+            }
+            throw PDFSourceError.textNotFound
+        }
+        private func writeTextClipboard(_ text: String, snapshot: PDFSourceSession.Snapshot) {
+            let board = NSPasteboard.general; board.clearContents(); _ = board.setString(text, forType: .string)
+            let style = ObjectClipboard.TextStyle(text: text, size: snapshot.fontSize, name: snapshot.fontName, color: snapshot.color)
+            if let data = try? JSONEncoder().encode(style) { _ = board.setData(data, forType: ObjectClipboard.sourceText) }
+        }
+        private func copyObjects(on view: PDFViewerView, cutting: Bool) {
+            if let editor = NSApp.keyWindow?.firstResponder as? NSTextView {
+                if cutting { editor.cut(nil) } else { editor.copy(nil) }; return
+            }
+            if let annotation = view.selectedAnnotation {
+                if copyAnnotationObjects(annotation) {
+                    if cutting { _ = view.deleteSelectedAnnotation() }
+                } else { manager.say("Could not write to the clipboard.", "Не удалось записать данные в буфер обмена.") }
+                return
+            }
+            if !cutting, let selection = view.currentSelection, let text = selection.string, !text.isEmpty, view.sourceSelection == nil {
+                let board = NSPasteboard.general; board.clearContents(); _ = board.setString(text, forType: .string); return
+            }
+            do {
+                let (session, item, index, selected) = try sourceSessionForSelection(view: view)
+                let copied = selected ?? session.snapshot.text
+                writeTextClipboard(copied, snapshot: session.snapshot)
+                if cutting {
+                    let remaining: String
+                    if let selected {
+                        guard let range = session.snapshot.text.range(of: selected) else { throw PDFSourceError.content }
+                        var updated = session.snapshot.text; updated.removeSubrange(range); remaining = updated
+                    } else { remaining = "" }
+                    let data = try session.applying(text: remaining, fontSize: session.snapshot.fontSize, color: session.snapshot.color)
+                    try installSourceData(data, item: item, index: index, view: view, bounds: session.resultingBounds)
+                }
+            } catch { sourceError(error) }
+        }
+        private func deleteObjects(on view: PDFViewerView) {
+            if let editor = NSApp.keyWindow?.firstResponder as? NSTextView { editor.delete(nil); return }
+            if view.deleteSelectedAnnotation() { return }
+            do {
+                let (session, item, index, selected) = try sourceSessionForSelection(view: view)
+                var remaining = ""
+                if let selected {
+                    guard let range = session.snapshot.text.range(of: selected) else { throw PDFSourceError.content }
+                    remaining = session.snapshot.text; remaining.removeSubrange(range)
+                }
+                let data = try session.applying(text: remaining, fontSize: session.snapshot.fontSize, color: session.snapshot.color)
+                try installSourceData(data, item: item, index: index, view: view, bounds: session.resultingBounds)
+            } catch { sourceError(error) }
+        }
+        private func pasteAnnotationData(_ data: Data, on view: PDFViewerView) -> Bool {
+            guard let target = view.currentPage, let source = PDFDocument(data: data), let page = source.page(at: 0) else { return false }
+                AnnotationMetadata.restore(source)
+                let originals = page.annotations.filter { !AnnotationMetadata.isContainer($0) }
+                let copies = originals.compactMap { $0.copy() as? PDFAnnotation }
+                guard !copies.isEmpty, copies.count == originals.count else { return false }
+                let union = copies.reduce(CGRect.null) { $0.union($1.bounds) }
+                let center = view.convert(CGPoint(x: view.bounds.midX,y: view.bounds.midY), to: target)
+                let crop = target.bounds(for: .cropBox)
+                let x = min(max(crop.minX, center.x-union.width/2), max(crop.minX,crop.maxX-union.width))
+                let y = min(max(crop.minY, center.y-union.height/2), max(crop.minY,crop.maxY-union.height))
+                for copy in copies { copy.page = nil; copy.bounds = copy.bounds.offsetBy(dx: x-union.minX,dy: y-union.minY); target.addAnnotation(copy) }
+                AnnotationMetadata.transfer(from: originals, to: copies)
+                manager.tool = .selectComments; view.setSourceSelection(nil); view.selectAnnotation(copies.first)
+                view.setNeedsDisplay(view.bounds); manager.send(.refresh); return true
+        }
+
+        private func pasteObjects(on view: PDFViewerView, board: NSPasteboard = .general) {
+            if let editor = NSApp.keyWindow?.firstResponder as? NSTextView { editor.paste(nil); return }
+            guard let item = manager.selected, let target = view.currentPage else { return }
+            if let data = board.data(forType: ObjectClipboard.annotations) {
+                if !pasteAnnotationData(data, on: view) { manager.say("Could not paste these PDF objects.", "Не удалось вставить эти объекты PDF.") }
+                return
+            }
+            let style = board.data(forType: ObjectClipboard.sourceText).flatMap { try? JSONDecoder().decode(ObjectClipboard.TextStyle.self, from: $0) }
+            guard let text = style?.text ?? board.string(forType: .string), !text.isEmpty else {
+                manager.say("The clipboard contains no PDF objects or text.", "В буфере обмена нет объектов PDF или текста."); return
+            }
+            do {
+                let index = item.document.index(for: target)
+                let point = view.convert(CGPoint(x: view.bounds.midX,y: view.bounds.midY), to: target)
+                let size = CGFloat(min(200,max(1,style?.fontSize ?? manager.textFontSize)))
+                let color = style?.color ?? NSColor(manager.annotationColor)
+                let session = try PDFSourceSession.adding(data: sourceData(item), pageIndex: index, point: point, fontSize: size, color: color, fontName: style?.fontName ?? "Arial")
+                let changed = try session.applying(text: text, fontSize: size, color: color)
+                manager.tool = .editText
+                try installSourceData(changed, item: item, index: index, view: view, bounds: session.resultingBounds)
+            } catch { sourceError(error) }
         }
 
         private func scheduleViewportSync(for view: PDFViewerView) {
@@ -1880,7 +2224,7 @@ private final class FreeTextEditorController: NSViewController, NSTextViewDelega
         textView.isRichText = false; textView.delegate = self
         textView.string = annotation.contents ?? ""
         textView.font = annotation.font ?? NSFont.systemFont(ofSize: 18)
-        textView.textColor = annotation.fontColor ?? .systemRed
+        textView.textColor = .labelColor
         textView.textContainerInset = NSSize(width: 5, height: 5)
         textView.isVerticallyResizable = true
         textView.autoresizingMask = [.width]
@@ -1921,7 +2265,7 @@ private final class FreeTextEditorController: NSViewController, NSTextViewDelega
         let measured = (textView.string as NSString).boundingRect(with: CGSize(width: max(20, originalBounds.width - 16), height: 10_000), options: [.usesLineFragmentOrigin, .usesFontLeading], attributes: [.font: font])
         let height = max(originalBounds.height, ceil(measured.height) + 16)
         annotation.bounds = CGRect(x: originalBounds.minX, y: originalBounds.maxY - height, width: originalBounds.width, height: height)
-        textView.font = font; textView.textColor = tint
+        textView.font = font; textView.textColor = .labelColor
         onLiveChange?()
     }
     @objc private func commit() { applyControls(); popover?.close() }
@@ -1936,6 +2280,68 @@ private final class FreeTextEditorController: NSViewController, NSTextViewDelega
         } else { applyControls() }
         onFinish?(cancelled)
     }
+}
+
+@MainActor
+private final class PDFSourceEditorController: NSViewController, NSPopoverDelegate {
+    let editor = NSTextView(frame: NSRect(x: 0,y: 0,width: 406,height: 150))
+    let snapshot: PDFSourceSession.Snapshot
+    let language: AppLanguage
+    private let size = NSTextField(string: "18")
+    private let width = NSTextField(string: "240")
+    private let color = NSColorWell(frame: .zero)
+    weak var popover: NSPopover?
+    var onFinish: ((Bool, String, CGFloat, NSColor, CGFloat) -> Bool)?
+    private var cancelled = false
+    private var finished = false
+    private var initialSizeString = ""
+    private var initialWidthString = ""
+    init(snapshot: PDFSourceSession.Snapshot, language: AppLanguage) {
+        self.snapshot = snapshot; self.language = language; super.init(nibName: nil,bundle: nil)
+    }
+    required init?(coder: NSCoder) { nil }
+    override func loadView() {
+        let root = NSView(frame: NSRect(x: 0,y: 0,width: 430,height: 285))
+        let label = NSTextField(labelWithString: language == .ru ? "Текстовый блок PDF" : "PDF text block")
+        label.font = NSFont.systemFont(ofSize: 12,weight: .semibold); label.frame = NSRect(x: 12,y: 257,width: 406,height: 18); root.addSubview(label)
+        let scroll = NSScrollView(frame: NSRect(x: 12,y: 100,width: 406,height: 150)); scroll.borderType = .bezelBorder; scroll.hasVerticalScroller = true
+        editor.isRichText = false; editor.string = snapshot.text; editor.font = NSFont.systemFont(ofSize: 14); editor.textColor = .labelColor
+        editor.isVerticallyResizable = true; editor.isHorizontallyResizable = false; editor.autoresizingMask = [.width]
+        editor.textContainer?.widthTracksTextView = true; editor.textContainerInset = NSSize(width: 6,height: 6)
+        editor.allowsUndo = true; editor.isAutomaticQuoteSubstitutionEnabled = false; editor.isAutomaticDashSubstitutionEnabled = false
+        scroll.documentView = editor; root.addSubview(scroll)
+        initialSizeString = String(format: "%.2f",snapshot.fontSize); initialWidthString = String(format: "%.2f",snapshot.width)
+        size.stringValue = initialSizeString; width.stringValue = initialWidthString; color.color = snapshot.color
+        let controls = NSStackView(views: [NSTextField(labelWithString: language == .ru ? "Размер" : "Size"),size,NSTextField(labelWithString: language == .ru ? "Ширина, pt" : "Width, pt"),width,color])
+        controls.frame = NSRect(x: 12,y: 64,width: 406,height: 28); controls.spacing = 8; root.addSubview(controls)
+        let font = NSTextField(labelWithString: snapshot.fontName + (language == .ru ? " · перенос по ширине блока" : " · wraps to block width"))
+        font.font = NSFont.systemFont(ofSize: 10); font.frame = NSRect(x: 12,y: 39,width: 406,height: 18); root.addSubview(font)
+        let cancel = NSButton(title: language == .ru ? "Отмена" : "Cancel",target: self,action: #selector(cancelEdit))
+        let apply = NSButton(title: language == .ru ? "Применить" : "Apply",target: self,action: #selector(applyEdit))
+        apply.keyEquivalent = "\r"
+        let buttons = NSStackView(views: [cancel,apply]); buttons.frame = NSRect(x: 243,y: 7,width: 175,height: 28); root.addSubview(buttons)
+        view = root
+    }
+    @objc private func cancelEdit() { cancelled = true; popover?.close() }
+    @objc private func applyEdit() {
+        view.window?.makeFirstResponder(editor)
+        if let popover, popoverShouldClose(popover) { popover.close() }
+    }
+    func popoverShouldClose(_ popover: NSPopover) -> Bool {
+        if finished { return true }
+        let fontSize = size.stringValue == initialSizeString ? snapshot.fontSize : CGFloat(min(200,max(1,Double(size.stringValue) ?? Double(snapshot.fontSize))))
+        let blockWidth = width.stringValue == initialWidthString ? snapshot.width : CGFloat(min(20000,max(10,Double(width.stringValue) ?? Double(snapshot.width))))
+        finished = true
+        let accepted = onFinish?(cancelled,editor.string,fontSize,color.color,blockWidth) ?? true
+        if !accepted { finished = false }
+        return accepted
+    }
+    func popoverDidClose(_ notification: Notification) {
+        // A document/tab change can close programmatically. Commit is permitted
+        // only when the coordinator still owns the same document snapshot.
+        if !finished, let popover { _ = popoverShouldClose(popover) }
+    }
+
 }
 
 @MainActor
@@ -1955,6 +2361,10 @@ private final class AnnotationOverlayView: NSView {
                 let handle = NSBezierPath(rect: CGRect(x: point.x - 4, y: point.y - 4, width: 8, height: 8))
                 NSColor.white.setFill(); handle.fill(); NSColor.systemBlue.setStroke(); handle.stroke()
             }
+        }
+        if let source = pdf.sourceSelection {
+            let rect = convert(pdf.convert(source.bounds, from: source.page), from: pdf)
+            NSColor.systemBlue.setStroke(); let path = NSBezierPath(rect: rect.insetBy(dx: -2,dy: -2)); path.lineWidth = 1; path.stroke()
         }
         if let preview = pdf.preview {
             let start = convert(pdf.convert(preview.start, from: preview.page), from: pdf)
@@ -1987,6 +2397,9 @@ private final class PDFViewerView: PDFView {
     var onViewportChange: (() -> Void)?
     var onCreateText: ((PDFPage, CGPoint, PDFAnnotation?) -> Void)?
     var onEditText: ((PDFAnnotation) -> Void)?
+    var onSourceTextRequest: ((PDFPage, CGPoint, Bool, Bool) -> Void)?
+    var onClipboardCommand: ((ViewerCommand) -> Void)?
+    private(set) var sourceSelection: (page: PDFPage, bounds: CGRect)?
     var onSelectionChanged: ((PDFAnnotation?) -> Void)?
     var onAnnotationChanged: (() -> Void)?
     var onCursorChange: ((CGPoint?, CGPoint?) -> Void)?
@@ -2066,7 +2479,7 @@ private final class PDFViewerView: PDFView {
         if nativeHit is NSScroller { return nativeHit }
         let intercepted: Bool
         switch activeTool {
-        case .hand, .typewriter, .rectangle, .line, .arrow, .callout, .selectComments: intercepted = true
+        case .hand, .typewriter, .rectangle, .line, .arrow, .callout, .selectComments, .addText, .editText: intercepted = true
         default: intercepted = false
         }
         let local = convert(point, from: superview)
@@ -2076,12 +2489,16 @@ private final class PDFViewerView: PDFView {
         super.resetCursorRects()
         switch activeTool {
         case .hand: addCursorRect(visibleRect, cursor: .openHand)
-        case .textSelection, .typewriter: addCursorRect(visibleRect, cursor: .iBeam)
+        case .textSelection, .typewriter, .addText, .editText: addCursorRect(visibleRect, cursor: .iBeam)
         case .rectangle, .line, .arrow, .callout: addCursorRect(visibleRect, cursor: .crosshair)
         default: break
         }
     }
+    func setSourceSelection(_ selection: (PDFPage, CGRect)?) {
+        sourceSelection = selection.map { (page: $0.0, bounds: $0.1) }; refreshOverlay()
+    }
     func selectAnnotation(_ annotation: PDFAnnotation?) {
+        if annotation != nil { sourceSelection = nil }
         if let annotation, let group = AnnotationMetadata.group(of: annotation), let page = annotation.page {
             selectedAnnotation = page.annotations.first { $0.type == "FreeText" && AnnotationMetadata.group(of: $0) == group } ?? annotation
         } else { selectedAnnotation = annotation }
@@ -2109,12 +2526,14 @@ private final class PDFViewerView: PDFView {
     override func mouseDown(with event: NSEvent) {
         trackCursor(event)
         if activeTool == .hand {
+            setSourceSelection(nil)
             panPoint = event.locationInWindow; NSCursor.closedHand.push(); cursorPushed = true; return
         }
         let local = convert(event.locationInWindow, from: nil)
         guard let page = page(for: local, nearest: false) else { selectAnnotation(nil); return }
         let point = convert(local, to: page)
         if activeTool == .selectComments {
+            setSourceSelection(nil)
             window?.makeFirstResponder(self)
             if let annotation = selectedAnnotation, annotation.page === page {
                 let corner = annotationCorners(annotation).firstIndex { corner in
@@ -2136,6 +2555,8 @@ private final class PDFViewerView: PDFView {
         }
         guard page.bounds(for: .cropBox).contains(point) else { return }
         switch activeTool {
+        case .addText: window?.makeFirstResponder(self); onSourceTextRequest?(page,point,true,true)
+        case .editText: window?.makeFirstResponder(self); onSourceTextRequest?(page,point,false,event.clickCount >= 2)
         case .typewriter: onCreateText?(page, point, nil)
         case .rectangle, .line, .arrow, .callout: preview = Preview(page: page, start: point, end: point, tool: activeTool); refreshOverlay()
         default: super.mouseDown(with: event)
@@ -2194,15 +2615,27 @@ private final class PDFViewerView: PDFView {
         }
         super.mouseUp(with: event)
     }
+    func deleteSelectedAnnotation() -> Bool {
+        guard let annotation = selectedAnnotation, let page = annotation.page else { return false }
+        if let group = AnnotationMetadata.group(of: annotation) {
+            for component in page.annotations where AnnotationMetadata.group(of: component) == group { page.removeAnnotation(component) }
+        } else { page.removeAnnotation(annotation) }
+        selectAnnotation(nil); setNeedsDisplay(bounds); onAnnotationChanged?(); return true
+    }
     override func keyDown(with event: NSEvent) {
-        if activeTool == .selectComments && (event.keyCode == 51 || event.keyCode == 117),
-           let annotation = selectedAnnotation, let page = annotation.page {
-            if let group = AnnotationMetadata.group(of: annotation) {
-                for component in page.annotations where AnnotationMetadata.group(of: component) == group { page.removeAnnotation(component) }
-            } else { page.removeAnnotation(annotation) }
-            selectAnnotation(nil); setNeedsDisplay(bounds); onAnnotationChanged?(); return
+        if event.modifierFlags.contains(.command) {
+            switch event.keyCode {
+            case 8: onClipboardCommand?(.copy); return
+            case 7: onClipboardCommand?(.cut); return
+            case 9: onClipboardCommand?(.paste); return
+            default: break
+            }
         }
-        if event.keyCode == 53 { selectAnnotation(nil); preview = nil; transform = nil; refreshOverlay(); return }
+        if event.keyCode == 51 || event.keyCode == 117 {
+            if activeTool == .selectComments && deleteSelectedAnnotation() { return }
+            if sourceSelection != nil { onClipboardCommand?(.deleteSelection); return }
+        }
+        if event.keyCode == 53 { selectAnnotation(nil); setSourceSelection(nil); preview = nil; transform = nil; refreshOverlay(); return }
         super.keyDown(with: event)
     }
     private func commitDrawing(_ drawing: Preview) {
@@ -2303,6 +2736,10 @@ private final class PDFViewerView: PDFView {
     }
     override func magnify(with event: NSEvent) {
         applyMagnification(event.magnification, at: convert(event.locationInWindow, from: nil))
+    }
+    override func viewDidChangeEffectiveAppearance() {
+        super.viewDidChangeEffectiveAppearance()
+        backgroundColor = NSColor(calibratedWhite: effectiveAppearance.bestMatch(from: [.darkAqua,.aqua]) == .darkAqua ? 0.12 : 0.82,alpha: 1)
     }
     override func viewDidEndLiveResize() { super.viewDidEndLiveResize(); onViewportChange?() }
     override func setFrameSize(_ size: NSSize) {

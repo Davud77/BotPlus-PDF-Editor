@@ -76,12 +76,21 @@ APP_BUNDLE="$DERIVED_DATA/Build/Products/Release/BotPlusPDFEditor.app"
 STAGED_APP="$TEMP_DIRECTORY/BotPlus PDF Editor.app"
 ditto "$APP_BUNDLE" "$STAGED_APP"
 ENTITLEMENTS="$PROJECT_ROOT/BotPlusPDFEditor/BotPlusPDFEditor.entitlements"
+for library in "$STAGED_APP/Contents/Frameworks/"*.dylib; do
+  [[ -f "$library" ]] || continue
+  if [[ -n "${BOTPLUS_SIGNING_IDENTITY:-}" ]]; then
+    codesign --force --options runtime --timestamp --sign "$BOTPLUS_SIGNING_IDENTITY" "$library"
+  else
+    codesign --force --sign - "$library"
+  fi
+  codesign --verify --strict "$library"
+done
 if [[ -n "${BOTPLUS_SIGNING_IDENTITY:-}" ]]; then
   codesign --force --options runtime --timestamp --sign "$BOTPLUS_SIGNING_IDENTITY" --entitlements "$ENTITLEMENTS" "$STAGED_APP"
 else
   codesign --force --sign - --entitlements "$ENTITLEMENTS" "$STAGED_APP"
 fi
-codesign --verify --strict --verbose=2 "$STAGED_APP"
+codesign --verify --deep --strict --verbose=2 "$STAGED_APP"
 
 APP_KILOBYTES="$(du -sk "$STAGED_APP" | awk '{print $1}')"
 IMAGE_MEGABYTES=$((APP_KILOBYTES / 1024 * 2 + 64))

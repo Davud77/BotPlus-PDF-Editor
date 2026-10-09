@@ -1,0 +1,4 @@
+module CPDFium {
+    header "BotPlusPDFium.h"
+    export *
+}
