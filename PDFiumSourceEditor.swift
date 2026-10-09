@@ -269,20 +269,28 @@ final class PDFSourceSession {
             let data = try Data(contentsOf: url)
             guard data.count <= Int(UInt32.max) else { throw PDFSourceError.font }
             let font = CTFontCreateWithFontDescriptor(CTFontDescriptorCreateWithAttributes([kCTFontURLAttribute: url] as CFDictionary),12,nil)
-            // One CID per Unicode scalar, even when several scalars share a glyph.
-            // PDFium's automatic cmap otherwise turns '-' into soft hyphen,
-            // ';' into Greek question mark and spaces into NBSP in some fonts.
+            // Keep CID == glyph ID for PDFKit's save path on macOS 14/15.
+            // The explicit ToUnicode map still prevents automatic cmap aliases
+            // from turning '-' into soft hyphen or ';' into Greek question mark.
             let scalars = Array(Set(zip(normalized,characterStyles).filter { $0.1.url == url }.flatMap { String($0.0).unicodeScalars.filter { $0 != "\n" }.map(\.value) })).sorted()
             guard scalars.count < 65_535 else { throw PDFSourceError.content }
             var glyphMap: [UInt8] = [0,0], codes: [UInt32: UInt32] = [:], mappings: [String] = []
-            for (index,scalar) in scalars.enumerated() {
+            var unicodeForGlyph: [CGGlyph: UInt32] = [:]
+            for scalar in scalars {
                 let unicode = UnicodeScalar(scalar)!
                 let units = Array(String(unicode).utf16)
                 var glyphs = [CGGlyph](repeating: 0,count: units.count)
                 let supported = CTFontGetGlyphsForCharacters(font,units,&glyphs,units.count)
                 guard supported || Character(String(unicode)).isWhitespace else { throw PDFSourceError.unsupportedGlyph }
-                let cid = UInt32(index+1), glyph = glyphs[0]
-                codes[scalar] = cid; glyphMap.append(UInt8(glyph >> 8)); glyphMap.append(UInt8(glyph & 255))
+                let glyph = glyphs[0], cid = UInt32(glyph)
+                if let previous = unicodeForGlyph[glyph], previous != scalar {
+                    guard Character(String(UnicodeScalar(previous)!)).isWhitespace && Character(String(unicode)).isWhitespace else { throw PDFSourceError.unsupportedGlyph }
+                    codes[scalar] = cid; continue
+                }
+                unicodeForGlyph[glyph] = scalar
+                codes[scalar] = cid
+                while glyphMap.count < (Int(glyph)+1)*2 { glyphMap.append(0) }
+                glyphMap[Int(glyph)*2] = UInt8(glyph >> 8); glyphMap[Int(glyph)*2+1] = UInt8(glyph & 255)
                 mappings.append(String(format: "<%04X> <%@>",cid,units.map { String(format: "%04X",$0) }.joined()))
             }
             var cmap = "/CIDInit /ProcSet findresource begin\n12 dict begin\nbegincmap\n/CIDSystemInfo << /Registry (Adobe) /Ordering (Identity) /Supplement 0 >> def\n/CMapName /BotPlusUnicode def\n/CMapType 2 def\n1 begincodespacerange\n<0000> <FFFF>\nendcodespacerange\n"
