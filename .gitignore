@@ -37,3 +37,7 @@ xcuserdata/
 .env
 .env.*
 !.env.example
+
+# Release disk images and checksums
+dist/
+*.dmg

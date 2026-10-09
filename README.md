@@ -9,10 +9,13 @@ A native macOS PDF workspace built with SwiftUI, AppKit, and Apple PDFKit. Its r
 
 ## Features
 
-- Windows-style dark ribbon with 13 localized tabs, grouped commands, quick actions, search, and a multi-document tab strip.
-- PDFKit viewport with PDF opening, drag and drop, continuous/single/two-page display, hand and text selection tools, page navigation, zoom, rotation, highlighting, save, save-as, and print.
-- Dockable, floating, and resizable workspace panels with saved visibility, docking side, and width.
-- Drafting-style viewport rulers synchronized to the PDF page position and zoom.
+- Windows-style dark ribbon with 13 localized tabs, grouped commands, and a 40 pt quick-access/title/search row drawn into the transparent native titlebar area beside the macOS traffic lights.
+- PDFKit viewport with PDF opening, drag and drop, continuous/single/two-page display, hand and text selection, page navigation, zoom, rotation, and guarded printing.
+- Live free-text editing with font size, color, opacity, and border controls; highlight/underline; rectangle, line, arrow, and grouped callout annotations.
+- Annotation selection, dragging, four-corner resizing, Delete/Backspace removal, and live vector drag previews.
+- Page insertion, duplication with annotations, deletion, and rotation. Save / Save As continues writing to the selected export URL.
+- Panel icon strips, one drawer per sidebar, direct left/right docking buttons, detachable NSPanel windows, and persistent docking/width state (200–600 pt).
+- Crop-box rulers based on PDFView coordinate conversion, with points/mm/inches, rotated-page support, clip-view scroll notifications, scale/page notifications, and live cursor hairlines.
 - Russian and English UI language selection under Help → UI Settings.
 - BotPlus app mark available as SVG, a SwiftUI preview, and a native icon asset catalog.
 
@@ -56,6 +59,46 @@ This writes PNGs and `Contents.json` into `Assets.xcassets/AppIcon.appiconset`, 
 ## Runtime notes
 
 The app defines no AppIntents types or shortcut declarations. Xcode may still invoke its metadata scanner for an application target; the scanner reports that extraction was skipped because AppIntents.framework is not linked. Live Text interaction is disabled at runtime when the installed PDFKit exposes its setter. Viewport-to-SwiftUI state synchronization is deferred until after AppKit updates complete to avoid publishing ObservableObject changes during representable updates. Errors from macOS services such as `linkd.autoShortcut`, and PDFKit OCR model availability diagnostics, depend on the host runtime and cannot be suppressed by app code when those system services are unavailable.
+
+## Workspace and editing
+
+Enable **View → Rulers** and choose pt/mm/in from the ruler corner or status bar. Pinch on the trackpad to zoom around the cursor; Command/Control-scroll also zooms. Coordinates are relative to the crop box: X increases to the right and Y increases upward in page space. Page rotation changes which PDF axis is shown by each ruler; ticks remain aligned with the displayed PDF.
+
+Use the side-strip icons to open or collapse a drawer. The side strip selects the active panel; no duplicate bottom tabs are shown. The header arrows move a panel directly left or right. Detach opens an NSPanel; its native close button re-docks it. The panel header X hides the panel. Resize with the divider; widths are also constrained by the space available for the document viewport.
+
+Use **Comment → Typewriter** and click a page to type in the live editor. Click Done or outside the popover to commit; Cancel restores existing text or removes a new annotation. Select PDF text and choose Highlight or Underline to create markup. Drag with Rectangle, Line, Arrow, or Callout to place vectors. Adjust defaults in the Properties inspector, or select an annotation and choose Apply to selected.
+
+Use **Home → Select Comments** to select an annotation. Drag its body to move it, drag one of its four handles to resize it, or press Delete/Backspace to remove it. Double-click a free-text annotation to reopen its editor. Callouts use a standard line and free-text annotation linked by persisted BotPlus metadata; moving the text updates the leader, and deleting either component removes the group.
+
+**Organize → Pages** inserts a blank page before the current page, duplicates the current page after it, or deletes it. Deletion keeps at least one page in the document.
+
+BotPlus preserves appearance settings and callout associations in a hidden, non-printing metadata annotation on each annotated page. Visible annotations are standard PDF types, and existing document metadata remains unchanged. PDFKit appearance streams retain transparency for other PDF readers.
+
+## Release build, DMG, and Git deployment
+
+```sh
+./build_and_deploy.sh --package-only
+```
+
+This builds Release for arm64, signs a staging copy, creates a writable HFS+ image, mounts it, adds the app and an Applications shortcut, detaches it, converts it to compressed UDZO, and verifies the result. Output files are `dist/BotPlus-PDF-Editor.dmg` and its SHA-256 checksum. Temporary mounts are cleaned up on failure or interruption.
+
+```sh
+./build_and_deploy.sh
+```
+
+GitHub Actions also runs the native checks and this packaging pipeline after a push to main. The resulting DMG and checksum are available as the workflow artifact.
+
+The default command also stages source changes, commits with `feat: add dynamic rulers, dockable panels, and editing tools`, and pushes `main` to `https://github.com/Davud77/BotPlus-PDF-Editor.git`. Git credentials and the remote repository must already be available. Release binaries are ignored by Git.
+
+An ad-hoc signature is the default for local use. Set `BOTPLUS_SIGNING_IDENTITY` to an installed Developer ID Application certificate name for distribution signing. Set `BOTPLUS_NOTARY_PROFILE` to an existing notarytool Keychain profile to submit the DMG and staple its notarization ticket. These credentials are read from the environment, never stored in the repository. Set `BOTPLUS_DERIVED_DATA` to choose another Xcode build directory.
+
+## Native verification
+
+```sh
+./Tools/verify_native.sh
+```
+
+The checks exercise coordinate conversions at 0/90/180/270°, pan/zoom geometry, anchored gesture magnification, live text, PDF annotation and opacity round-trips, callout grouping, drag/resize/delete, page edits, and panel state. The test runner creates a hidden window and temporary PDFs; it does not modify project PDFs.
 
 ## Repository setup
 

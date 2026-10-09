@@ -1,0 +1,38 @@
+name: Build and package macOS DMG
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: dmg-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  package:
+    runs-on: macos-15
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+      - name: Verify PDF persistence and native geometry
+        run: ./Tools/verify_native.sh
+      - name: Build, sign, and package
+        run: ./build_and_deploy.sh --package-only
+        env:
+          BOTPLUS_DERIVED_DATA: ${{ runner.temp }}/BotPlusDerivedData
+      - name: Upload DMG and checksum
+        uses: actions/upload-artifact@v7
+        with:
+          name: BotPlus-PDF-Editor-arm64
+          path: |
+            dist/BotPlus-PDF-Editor.dmg
+            dist/BotPlus-PDF-Editor.dmg.sha256
+          if-no-files-found: error
+          compression-level: 0
+          retention-days: 30
