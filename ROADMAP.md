@@ -1,6 +1,6 @@
 # BotPlus PDF Editor Roadmap
 
-This roadmap records the planned engineering work after the 1.0.0 desktop foundation. Dates are intentionally omitted until delivery windows are agreed.
+This roadmap records the planned engineering work after the 1.1 desktop foundation. Dates are intentionally omitted until delivery windows are agreed.
 
 ## Milestone 1 — Engineering Measurement Subsystem
 

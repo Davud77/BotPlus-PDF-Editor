@@ -2,11 +2,12 @@ import SwiftUI
 import AppKit
 import PDFKit
 import AVFoundation
+import CoreText
 import UniformTypeIdentifiers
 
 private enum BotPlusBrand {
     static let name = "BotPlus PDF Editor"
-    static let version = "1.0.0"
+    static let version = "1.1"
     static let copyright = "© 2026 BotPlus"
     static let supportURL = URL(string: "https://github.com/Davud77/BotPlus-PDF-Editor")!
     static let telegramURL = URL(string: "https://t.me/botplus_pdf")!
@@ -390,6 +391,7 @@ private final class DocumentManager: ObservableObject {
         didSet { UserDefaults.standard.set(theme.rawValue, forKey: "BotPlusPDFEditor.theme") }
     }
     @Published var thumbnailZoom = 0.55
+    var contentRevision = 0
     @Published var selectedOutline: PDFOutline?
     @Published var stampText = "СОГЛАСОВАНО"
     @Published var annotationFill = false
@@ -469,7 +471,7 @@ private final class DocumentManager: ObservableObject {
         }
     }
 
-    func send(_ next: ViewerCommand) { command = next; commandIndex &+= 1 }
+    func send(_ next: ViewerCommand) { if next == .refresh { contentRevision &+= 1 }; command = next; commandIndex &+= 1 }
     func navigate(to index: Int) {
         guard finishSourceEditing?() != false else { return }
         guard let selected, selected.pageCount > 0 else { return }
@@ -1377,7 +1379,8 @@ private struct PanelBody: View {
 
     @ViewBuilder private var thumbnailList: some View {
         Group {
-            if let document = manager.selected?.document {
+            if let item = manager.selected {
+                let document = item.document
                 VStack(spacing: 4) {
                     HStack {
                         Image(systemName: "minus.magnifyingglass")
@@ -1397,7 +1400,7 @@ private struct PanelBody: View {
                                         let ratio = rotated ? box.width/max(1,box.height) : box.height/max(1,box.width)
                                         Button { manager.navigate(to: index) } label: {
                                             VStack(spacing: 4) {
-                                                Image(nsImage: PDFRasterizer.image(page,size: CGSize(width: cell*2,height: cell*ratio*2)))
+                                                Image(nsImage: PDFThumbnailCache.shared.image(page: page,documentID: item.id,index: index,revision: manager.contentRevision,width: cell,ratio: ratio))
                                                     .resizable().aspectRatio(contentMode: .fit).frame(width: cell,height: cell*ratio)
                                                     .background(.white)
                                                     .overlay(Rectangle().stroke(manager.selected?.pageIndex == index ? Palette.accent : Palette.separator,lineWidth: 2))
@@ -1420,7 +1423,7 @@ private struct PanelBody: View {
                                 }
                             }.padding(8)
                         }
-                    }
+                    }.background(ThumbnailGestureRegion(manager: manager))
                 }
             } else { empty(manager.language == .ru ? "Откройте PDF" : "Open a PDF",symbol: "doc.text") }
         }
@@ -1914,8 +1917,12 @@ private struct PDFViewer: NSViewRepresentable {
                 guard let view else { return }; self.update(view)
             }
         }
+        private var previousBounds = CGRect.zero
         func update(_ view: PDFViewerView) {
+            var changed = previousBounds != view.bounds
+            previousBounds = view.bounds
             if activeDocumentID != manager.selected?.id || view.document !== manager.selected?.document {
+                changed = true
                 activeDocumentID = manager.selected?.id
                 lastSearchText = ""
                 if let popover = textPopover { Task { @MainActor in popover.close() } }
@@ -1929,15 +1936,18 @@ private struct PDFViewer: NSViewRepresentable {
                     if let page = item.document.page(at: item.pageIndex) { view.go(to: page) }
                 }
             }
-            if view.displayMode != manager.layout.pdfMode { view.displayMode = manager.layout.pdfMode }
-            if view.displaysAsBook != (manager.layout == .spread) { view.displaysAsBook = manager.layout == .spread }
-            view.activeTool = manager.tool
-            view.isInMarkupMode = ![PDFTool.textSelection,.highlight,.underline,.strike].contains(manager.tool)
+            if view.displayMode != manager.layout.pdfMode { view.displayMode = manager.layout.pdfMode; changed = true }
+            if view.displaysAsBook != (manager.layout == .spread) { view.displaysAsBook = manager.layout == .spread; changed = true }
+            if view.activeTool != manager.tool { view.activeTool = manager.tool; changed = true }
+            let markup = ![PDFTool.textSelection,.highlight,.underline,.strike].contains(manager.tool)
+            if view.isInMarkupMode != markup { view.isInMarkupMode = markup }
             view.fillEnabled = manager.annotationFill
-            view.backgroundColor = NSColor(calibratedWhite: manager.theme.isDark ? 0.12 : 0.82, alpha: 1)
-            view.strokeColor = NSColor(manager.annotationColor).withAlphaComponent(CGFloat(manager.annotationOpacity))
-            view.strokeWidth = CGFloat(manager.annotationStrokeWidth)
-            view.refreshOverlay()
+            let background = NSColor(calibratedWhite: manager.theme.isDark ? 0.12 : 0.82,alpha: 1)
+            if !view.backgroundColor.isEqual(background) { view.backgroundColor = background; changed = true }
+            let stroke = NSColor(manager.annotationColor).withAlphaComponent(CGFloat(manager.annotationOpacity))
+            if !view.strokeColor.isEqual(stroke) { view.strokeColor = stroke; changed = true }
+            if view.strokeWidth != CGFloat(manager.annotationStrokeWidth) { view.strokeWidth = CGFloat(manager.annotationStrokeWidth); changed = true }
+            if changed { view.refreshOverlay() }
             observeScroll(in: view)
             if manager.searchText != lastSearchText, !manager.searchText.isEmpty {
                 lastSearchText = manager.searchText
@@ -1955,7 +1965,7 @@ private struct PDFViewer: NSViewRepresentable {
                     self.perform(command, on: view)
                 }
             }
-            scheduleViewportSync(for: view)
+            if changed { scheduleViewportSync(for: view) }
         }
 
         private func perform(_ command: ViewerCommand, on view: PDFViewerView) {
@@ -3215,13 +3225,21 @@ private enum PDFRasterizer {
         }
     }
     static func textPage(_ text: String) -> PDFPage? {
-        let data = NSMutableData()
-        guard let consumer = CGDataConsumer(data: data),let context = CGContext(consumer: consumer,mediaBox: nil,nil) else { return nil }
-        let box = CGRect(x: 0,y: 0,width: 612,height: 792)
-        context.beginPDFPage([kCGPDFContextMediaBox: NSData(bytes: [box],length: MemoryLayout<CGRect>.size)] as CFDictionary)
-        NSGraphicsContext.saveGraphicsState(); NSGraphicsContext.current = NSGraphicsContext(cgContext: context,flipped: false)
-        (text as NSString).draw(in: CGRect(x: 40,y: 40,width: 532,height: 712),withAttributes: [.font:NSFont.systemFont(ofSize: 12),.foregroundColor:NSColor.black])
-        NSGraphicsContext.restoreGraphicsState(); context.endPDFPage(); context.closePDF()
+        let data = NSMutableData(); var box = CGRect(x: 0,y: 0,width: 612,height: 792)
+        guard let consumer = CGDataConsumer(data: data),let context = CGContext(consumer: consumer,mediaBox: &box,nil) else { return nil }
+        context.beginPDFPage(nil); context.textMatrix = .identity
+        let font = CTFontCreateWithName("Arial" as CFString,12,nil)
+        let attributes: [NSAttributedString.Key:Any] = [NSAttributedString.Key(kCTFontAttributeName as String):font,NSAttributedString.Key(kCTForegroundColorAttributeName as String):NSColor.black.cgColor]
+        let attributed = NSAttributedString(string: text,attributes: attributes)
+        let typesetter = CTTypesetterCreateWithAttributedString(attributed)
+        var offset = 0,y: CGFloat = 748
+        while offset < attributed.length && y > 40 {
+            let count = max(1,CTTypesetterSuggestLineBreak(typesetter,offset,532))
+            let line = CTTypesetterCreateLine(typesetter,CFRange(location: offset,length: count))
+            context.textPosition = CGPoint(x: 40,y: y); CTLineDraw(line,context)
+            y -= 16; offset += count
+        }
+        context.endPDFPage(); context.closePDF()
         return PDFDocument(data: data as Data)?.page(at: 0)?.copy() as? PDFPage
     }
 }
@@ -3767,5 +3785,77 @@ private extension DocumentManager {
             PDFBookmarkStore.restore(bookmarks,on: document)
             let entry = PDFDocumentItem(url: FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString+".pdf"),document: document); entry.isUntitled = true; self.insertDocument(entry)
         }
+    }
+}
+
+@MainActor
+private struct ThumbnailGestureRegion: NSViewRepresentable {
+    @ObservedObject var manager: DocumentManager
+    func makeNSView(context: Context) -> ThumbnailGestureView {
+        let view = ThumbnailGestureView(frame: .zero); view.manager = manager; return view
+    }
+    func updateNSView(_ view: ThumbnailGestureView,context: Context) { view.manager = manager }
+    static func dismantleNSView(_ view: ThumbnailGestureView,coordinator: ()) { view.stop() }
+}
+
+@MainActor
+private final class ThumbnailGestureView: NSView {
+    weak var manager: DocumentManager?
+    private var monitor: Any?
+    private var pendingValue: Double?
+    private var scheduled = false
+    override func hitTest(_ point: NSPoint) -> NSView? { nil }
+    override func viewDidMoveToWindow() {
+        super.viewDidMoveToWindow(); stop(); guard window != nil else { return }
+        monitor = NSEvent.addLocalMonitorForEvents(matching: [.magnify,.scrollWheel]) { [weak self] event in
+            var handled = false
+            MainActor.assumeIsolated {
+                guard let self,event.window === self.window else { return }
+                let point = self.convert(event.locationInWindow,from: nil)
+                guard self.visibleRect.contains(point) else { return }
+                if event.type == .magnify { self.adjust(Double(event.magnification)); handled = true }
+                else if event.modifierFlags.contains(.control) || event.modifierFlags.contains(.command) {
+                    self.adjust(Double(-event.scrollingDeltaY)*0.008); handled = true
+                }
+            }
+            return handled ? nil : event
+        }
+    }
+    func adjust(_ delta: Double) {
+        guard delta.isFinite,let manager else { return }
+        pendingValue = Self.zoom((pendingValue ?? manager.thumbnailZoom),delta: delta)
+        guard !scheduled else { return }; scheduled = true
+        DispatchQueue.main.asyncAfter(deadline: .now()+0.016) { [weak self] in
+            guard let self else { return }; self.scheduled = false
+            if let value = self.pendingValue { self.pendingValue = nil; self.manager?.thumbnailZoom = value }
+        }
+    }
+    static func zoom(_ value: Double,delta: Double) -> Double { min(1,max(0,value+delta*0.75)) }
+    func stop() { if let monitor { NSEvent.removeMonitor(monitor) }; monitor = nil; pendingValue = nil }
+}
+
+@MainActor
+private final class PDFThumbnailCache {
+    static let shared = PDFThumbnailCache()
+    private let cache = NSCache<NSString,NSImage>()
+    private(set) var renderCount = 0
+    init() { cache.totalCostLimit = 48*1024*1024; cache.countLimit = 240 }
+    func image(page: PDFPage,documentID: UUID,index: Int,revision: Int,width: CGFloat,ratio: CGFloat) -> NSImage {
+        let bucket = min(1200,max(64,Int((width*2/64).rounded())*64))
+        let key = "\(documentID.uuidString)|\(index)|\(revision)|\(bucket)" as NSString
+        if let image = cache.object(forKey: key) { return image }
+        let height = max(1,CGFloat(bucket)*max(0.1,min(12,ratio)))
+        let factor = min(1,4096/max(CGFloat(bucket),height))
+        let w = max(1,Int(CGFloat(bucket)*factor)),h = max(1,Int(height*factor))
+        guard let ref = page.pageRef,let context = CGContext(data: nil,width: w,height: h,bitsPerComponent: 8,bytesPerRow: w*4,space: CGColorSpaceCreateDeviceRGB(),bitmapInfo: CGImageAlphaInfo.premultipliedLast.rawValue) else { return NSImage(size: CGSize(width: width,height: width*ratio)) }
+        let rect = CGRect(x: 0,y: 0,width: w,height: h)
+        context.setFillColor(NSColor.white.cgColor); context.fill(rect)
+        NSGraphicsContext.saveGraphicsState(); NSGraphicsContext.current = NSGraphicsContext(cgContext: context,flipped: false)
+        context.concatenate(ref.getDrawingTransform(.cropBox,rect: rect,rotate: 0,preserveAspectRatio: true)); context.drawPDFPage(ref)
+        for annotation in page.annotations where annotation.shouldDisplay && !AnnotationMetadata.isContainer(annotation) { annotation.draw(with: .cropBox,in: context) }
+        NSGraphicsContext.restoreGraphicsState()
+        guard let bitmap = context.makeImage() else { return NSImage(size: rect.size) }
+        let image = NSImage(cgImage: bitmap,size: CGSize(width: width,height: width*ratio))
+        cache.setObject(image,forKey: key,cost: w*h*4); renderCount += 1; return image
     }
 }

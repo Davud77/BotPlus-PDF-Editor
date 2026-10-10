@@ -470,12 +470,17 @@ private func runRibbonFeatureChecks(root: URL) throws {
     let url = root.appendingPathComponent("ribbon-features.pdf"); expect(document.write(to: url),"create searchable source page")
     let manager = DocumentManager(); manager.open(url); let item = manager.selected!,page = item.document.page(at: 0)!
     let pdf = PDFViewerView(frame: CGRect(x: 0,y: 0,width: 600,height: 800))
+    let featureWindow = NSWindow(contentRect: pdf.frame,styleMask: [.titled],backing: .buffered,defer: false)
+    featureWindow.isReleasedWhenClosed = false; featureWindow.contentView = pdf
+    defer { featureWindow.close() }
     let coordinator = PDFViewer.Coordinator(manager: manager); coordinator.attach(pdf); coordinator.update(pdf)
+    pdf.layoutDocumentView(); pdf.layoutSubtreeIfNeeded(); pdf.go(to: page)
     manager.annotationColor = .purple; manager.annotationOpacity = 0.37
     for (command,type) in [(ViewerCommand.highlight,"Highlight"),(.underline,"Underline"),(.strike,"StrikeOut")] {
         pdf.setCurrentSelection(page.selection(for: page.bounds(for: .cropBox)),animate: false)
         coordinator.checkCommand(command,view: pdf)
         let markup = page.annotations.filter { $0.type == type }
+        if markup.isEmpty { print("MARKUP DIAGNOSTIC",page.string ?? "nil",pdf.currentSelection?.string ?? "nil",pdf.document === item.document); fflush(nil) }
         expect(!markup.isEmpty,"working "+type); expect(abs(Double(AnnotationMetadata.alpha(of: markup[0]))-0.37) < 0.01,"markup uses selected opacity")
         expect(AnnotationMetadata.group(of: markup[0]) != nil,"multiline markup is grouped for property changes")
     }
@@ -509,6 +514,15 @@ private func runRibbonFeatureChecks(root: URL) throws {
     manager.undoDocument(redo: false); coordinator.update(pdf)
     coordinator.createTOC(item: item,view: pdf)
     expect(item.pageCount == 3 && (item.document.page(at: 0)?.string ?? "").contains("СОДЕРЖАНИЕ"),"TOC creates a searchable PDF page")
+    expect(ThumbnailGestureView.zoom(0.5,delta: 0.2) > 0.5,"pinch-out increases thumbnail size")
+    expect(ThumbnailGestureView.zoom(0.5,delta: -0.2) < 0.5,"pinch-in decreases thumbnail size")
+    expect(ThumbnailGestureView.zoom(0.99,delta: 2) == 1 && ThumbnailGestureView.zoom(0.01,delta: -2) == 0,"thumbnail gesture range is clamped")
+    let cache = PDFThumbnailCache(),key = UUID()
+    let one = cache.image(page: page,documentID: key,index: 0,revision: 1,width: 100,ratio: 792/612)
+    let two = cache.image(page: page,documentID: key,index: 0,revision: 1,width: 101,ratio: 792/612)
+    expect(one === two && cache.renderCount == 1,"nearby thumbnail sizes reuse one cached raster")
+    _ = cache.image(page: page,documentID: key,index: 0,revision: 2,width: 100,ratio: 792/612)
+    expect(cache.renderCount == 2,"document edits invalidate thumbnail content")
     let panel = PanelWorkspaceModel(); panel.setWidth(380,for: .thumbnails); panel.select(.thumbnails); panel.select(.bookmarks)
     expect(panel.configuration(for: .bookmarks).width == 380,"switching left panels keeps the dock width")
     let output = root.appendingPathComponent("ribbon-features-saved.pdf"); AnnotationMetadata.prepareForSave(item.document)
