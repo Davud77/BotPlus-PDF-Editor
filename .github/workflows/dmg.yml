@@ -29,10 +29,20 @@ jobs:
       - name: Upload DMG and checksum
         uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7
         with:
-          name: BotPlus-PDF-Editor-arm64
+          name: BotPlus-PDF-Editor-universal
           path: |
             dist/BotPlus-PDF-Editor.dmg
             dist/BotPlus-PDF-Editor.dmg.sha256
           if-no-files-found: error
           compression-level: 0
           retention-days: 30
+
+  intel-checks:
+    runs-on: macos-15-intel
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          persist-credentials: false
+      - name: Verify PDF editing on Intel
+        run: ./Tools/verify_native.sh

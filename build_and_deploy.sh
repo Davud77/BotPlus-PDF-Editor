@@ -10,7 +10,7 @@ for argument in "$@"; do
       cat <<'HELP'
 Usage: ./build_and_deploy.sh [--package-only]
 
-Builds the arm64 Release app and writes dist/BotPlus-PDF-Editor.dmg.
+Builds the universal arm64/x86_64 Release app and writes dist/BotPlus-PDF-Editor.dmg.
 By default, commits source changes and pushes main to Davud77/BotPlus-PDF-Editor.
 --package-only builds and packages without changing Git or contacting GitHub.
 
@@ -67,7 +67,7 @@ cd "$PROJECT_ROOT"
 
 xcodebuild -project "$PROJECT_ROOT/BotPlusPDFEditor.xcodeproj" \
   -scheme BotPlusPDFEditor -configuration Release \
-  -destination 'platform=macOS,arch=arm64' -derivedDataPath "$DERIVED_DATA" \
+  -destination 'generic/platform=macOS' ARCHS='arm64 x86_64' ONLY_ACTIVE_ARCH=NO -derivedDataPath "$DERIVED_DATA" \
   CODE_SIGNING_ALLOWED=NO build
 
 APP_BUNDLE="$DERIVED_DATA/Build/Products/Release/BotPlusPDFEditor.app"

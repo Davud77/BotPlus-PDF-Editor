@@ -1,6 +1,6 @@
 # Validation
 
-The source-text editor uses the pinned PDFium arm64 library in addition to Apple SDKs. Verified locally on Apple Silicon with Swift 6 and the installed macOS SDK:
+The source-text editor uses the pinned PDFium universal arm64/x86_64 library in addition to Apple SDKs. Verified locally on Apple Silicon with Swift 6 and the installed macOS SDK:
 
 - Release `xcodebuild` completed successfully for arm64.
 - `Tools/verify_native.sh` passed. It exercises PDF coordinate round-trips at 0/90/180/270°, ruler pan/zoom geometry, two-finger scrolling, cursor-anchored magnification within native clip alignment, live text changes, saved opacity and callout associations, synthetic annotation drag/resize/Delete events, page insertion/deletion/duplication, PDF reopen, and panel state invariants.
@@ -18,3 +18,5 @@ The source-text editor uses the pinned PDFium arm64 library in addition to Apple
 The local execution sandbox prevents `hdiutil` from starting `hdiejectd`; disk-image creation returns “Device not configured.” The mounted-volume and UDZO steps therefore run in the included GitHub Actions workflow or a normal macOS Terminal session. This limitation does not indicate a Swift compilation failure.
 
 The native checks use a hidden window and synchronous PDFKit operations. Physical trackpad gestures and a full interactive GUI session should also be checked on the release machine. Public Gatekeeper-trusted distribution requires an installed Developer ID certificate and notarization credentials; the pipeline supports both through environment variables.
+
+Expanded ribbon regressions cover configured markup opacity and line grouping; all implemented drawing subtypes; saved notes, stamps, URL links and widget values; bookmark sorting/merging, undo/redo targets, searchable TOC pages and PDF image insertion. The serializer copies current pages rather than cached in-memory output, keeps bookmark records separately, normalizes empty content stream arrays and atomically replaces local files. Source annotation metadata remains hidden/non-printing. Universal build and separate native Intel CI checks are included.

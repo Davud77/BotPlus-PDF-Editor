@@ -27,7 +27,7 @@ Commands without implemented PDF behavior show a localized development notice. T
 
 - macOS 14 or later; Swift 6; Xcode 16 or later recommended.
 - Apple Silicon is the primary target. The project uses only Apple SDK frameworks: SwiftUI, AppKit, PDFKit, and UniformTypeIdentifiers.
-- PDFium 157.0.8086.0 is embedded for original PDF text editing; no separate installation is required. The pinned arm64 library, headers, and notices are in `Vendor/PDFium`.
+- PDFium 157.0.8086.0 is embedded for original PDF text editing; no separate installation is required. The pinned universal arm64/x86_64 library, headers, and notices are in `Vendor/PDFium`.
 - App Sandbox is enabled with user-selected PDF read/write access. Signing and notarization identities are configured in Xcode for your distribution account.
 
 ## Build with Xcode
@@ -42,7 +42,7 @@ Or build from Terminal:
 xcodebuild -project BotPlusPDFEditor.xcodeproj \
   -scheme BotPlusPDFEditor \
   -configuration Release \
-  -destination 'platform=macOS,arch=arm64' \
+  -destination 'generic/platform=macOS' \
   -derivedDataPath build/DerivedData build
 ```
 
@@ -133,3 +133,7 @@ PDFium component notices are included in the app and listed in [THIRD_PARTY_NOTI
 ### Workspace editing details
 
 The inspector shows document properties until text, an image, a vector object or an annotation is selected. Empty clicks clear selection. Thumbnail context menus provide page copy/paste, duplicate/delete, blank insertion and rotation; navigation centers the page. The in-place editor has no field background and all PDF content and editing handles are clipped to the document viewport. The font list contains system families/faces and PDF font names. Embedded subsets without a usable Unicode program require their full installed font or another font; unsupported glyphs are rejected without replacing the original text.
+
+### Universal release and ribbon tools
+
+The Release application and PDFium dylib contain both arm64 and x86_64 slices. CI runs native persistence checks on Apple Silicon and Intel. Implemented tools include colored/transparent highlight, underline and strikeout; editable text stamps, notes and URL/page links; rectangle, ellipse, cloud, pencil and whole-annotation eraser; PDF image content insertion; basic AcroForm fields and JSON data; bookmark tree operations, batch changes, TOC and HTML/text export; page import/extract/split/swap/crop; editable watermark/header/Bates annotations; PNG export, file merging, read-aloud and word count. Thumbnail size controls switch between a grid and one page per panel width. Dock widths stay constant between panels. Undo/Redo uses bounded document history and preserves bookmark targets. Advanced named-destination editing, calibrated measurements, OCR, cryptographic signatures, office conversion and external integrations remain under development.

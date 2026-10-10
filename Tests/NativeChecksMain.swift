@@ -198,6 +198,7 @@ struct NativeChecks {
         try runPDFiumChecks(root: root)
         try runTextBlockChecks()
         try runInlineTextChecks()
+        try runRibbonFeatureChecks(root: root)
         let originalPages = item.pageCount
         coordinator.checkCommand(.duplicatePageAt(0),view: pdf)
         expect(item.pageCount == originalPages+1,"thumbnail menu duplicates the requested page")
@@ -458,4 +459,73 @@ private func runInlineTextChecks() throws {
     inline.cancel(); expect(!inline.isAttached && !model.active,"cancel removes the in-place editor and its temporary mask")
     window.close()
     print("PASS: inline text editor, block catalog, partial formatting, move, rotation, field stretching, source save, and cleanup")
+}
+
+@MainActor
+private func runRibbonFeatureChecks(root: URL) throws {
+    func expect(_ condition: @autoclosure () -> Bool,_ message: String) { if !condition() { fatalError("FEATURE CHECK FAILED: "+message) } }
+    let document = PDFDocument()
+    let first = PDFRasterizer.textPage("Hello annotation tools\nSecond line for markup")!
+    document.insert(first,at: 0); document.insert(PDFRasterizer.textPage("Second page")!,at: 1)
+    let url = root.appendingPathComponent("ribbon-features.pdf"); expect(document.write(to: url),"create searchable source page")
+    let manager = DocumentManager(); manager.open(url); let item = manager.selected!,page = item.document.page(at: 0)!
+    let pdf = PDFViewerView(frame: CGRect(x: 0,y: 0,width: 600,height: 800))
+    let coordinator = PDFViewer.Coordinator(manager: manager); coordinator.attach(pdf); coordinator.update(pdf)
+    manager.annotationColor = .purple; manager.annotationOpacity = 0.37
+    for (command,type) in [(ViewerCommand.highlight,"Highlight"),(.underline,"Underline"),(.strike,"StrikeOut")] {
+        pdf.setCurrentSelection(page.selection(for: page.bounds(for: .cropBox)),animate: false)
+        coordinator.checkCommand(command,view: pdf)
+        let markup = page.annotations.filter { $0.type == type }
+        expect(!markup.isEmpty,"working "+type); expect(abs(Double(AnnotationMetadata.alpha(of: markup[0]))-0.37) < 0.01,"markup uses selected opacity")
+        expect(AnnotationMetadata.group(of: markup[0]) != nil,"multiline markup is grouped for property changes")
+    }
+    for tool in [PDFTool.rectangle,.ellipse,.line,.arrow,.cloud,.pencil] {
+        let count = page.annotations.count
+        pdf.checkDraw(page: page,start: CGPoint(x: 70,y: 400),end: CGPoint(x: 180,y: 480),tool: tool)
+        expect(page.annotations.count == count+1,"draw tool creates a real annotation: "+String(describing: tool))
+        if tool == .pencil || tool == .cloud { expect(!(page.annotations.last!.paths ?? []).isEmpty,"ink annotation has vector paths") }
+    }
+    let stamp = PDFAnnotation(bounds: CGRect(x: 200,y: 250,width: 180,height: 44),forType: .freeText,withProperties: nil)
+    stamp.contents = "APPROVED"; stamp.font = .boldSystemFont(ofSize: 18); stamp.fontColor = .red; stamp.color = .clear
+    let border = PDFBorder(); border.lineWidth = 2; stamp.border = border; page.addAnnotation(stamp)
+    let note = PDFAnnotation(bounds: CGRect(x: 240,y: 220,width: 24,height: 24),forType: .text,withProperties: nil); note.contents = "Persistent note"; note.iconType = .note; page.addAnnotation(note)
+    let link = PDFAnnotation(bounds: CGRect(x: 250,y: 180,width: 80,height: 20),forType: .link,withProperties: nil); link.action = PDFActionURL(url: URL(string: "https://github.com/Davud77/BotPlus-PDF-Editor")!); page.addAnnotation(link)
+    for (offset,tool) in [PDFTool.formText,.formCheckbox,.formRadio,.formChoice,.formButton].enumerated() {
+        let widget = PDFWidgetFactory.make(tool,bounds: CGRect(x: 300,y: 400-offset*36,width: 180,height: 28),name: "Field\(offset)",choices: ["Yes","No"])
+        if tool == .formText { widget.widgetStringValue = "Filled text" }
+        if tool == .formCheckbox { widget.buttonWidgetState = .onState }
+        page.addAnnotation(widget)
+    }
+    manager.addBookmark(title: "Zebra",page: page); manager.addBookmark(title: "Alpha",page: item.document.page(at: 1)!)
+    manager.addBookmark(title: "Alpha",page: item.document.page(at: 1)!)
+    let initialOutline = manager.bookmarkRoot()!; coordinator.sortBookmarks(initialOutline); coordinator.mergeBookmarks(initialOutline,document: item.document)
+    expect(initialOutline.numberOfChildren == 2 && initialOutline.child(at: 0)?.label == "Alpha","bookmarks sort and merge duplicates")
+    manager.selectedOutline = nil
+    let beforeUndo = item.pageCount
+    item.historyDate = .distantPast
+    coordinator.checkCommand(.duplicatePageAt(1),view: pdf)
+    manager.undoDocument(redo: false); expect(item.pageCount == beforeUndo,"undo restores document pages")
+    manager.undoDocument(redo: true); expect(item.pageCount == beforeUndo+1,"redo restores page operation")
+    manager.undoDocument(redo: false); coordinator.update(pdf)
+    coordinator.createTOC(item: item,view: pdf)
+    expect(item.pageCount == 3 && (item.document.page(at: 0)?.string ?? "").contains("СОДЕРЖАНИЕ"),"TOC creates a searchable PDF page")
+    let panel = PanelWorkspaceModel(); panel.setWidth(380,for: .thumbnails); panel.select(.thumbnails); panel.select(.bookmarks)
+    expect(panel.configuration(for: .bookmarks).width == 380,"switching left panels keeps the dock width")
+    let output = root.appendingPathComponent("ribbon-features-saved.pdf"); AnnotationMetadata.prepareForSave(item.document)
+    expect(item.document.write(to: output),"save all feature annotations")
+    let reopened = PDFDocument(url: output)!; AnnotationMetadata.restore(reopened)
+    let annotations = (0..<reopened.pageCount).flatMap { reopened.page(at: $0)?.annotations ?? [] }
+    for type in ["Text","Link","Ink","Circle","Square","Highlight","Underline","StrikeOut","Widget"] { expect(annotations.contains { $0.type == type },"persist "+type) }
+    expect(annotations.contains { $0.contents == "APPROVED" },"persist engineering text stamp")
+    expect(annotations.contains { $0.fieldName == "Field0" && $0.widgetStringValue == "Filled text" },"persist form input")
+    expect(reopened.outlineRoot?.numberOfChildren == 2,"persist outline hierarchy")
+    let image = NSImage(size: CGSize(width: 16,height: 16),flipped: false) { rect in NSColor.red.setFill(); NSBezierPath(rect: rect).fill(); return true }
+    let imageData = try PDFSourceSession.insertingImage(data: item.document.dataRepresentation()!,pageIndex: 1,image: image.cgImage(forProposedRect: nil,context: nil,hints: nil)!,bounds: CGRect(x: 80,y: 60,width: 100,height: 100))
+    let imageInfo = try PDFSourceSession.objectInfo(data: imageData,pageIndex: 1,point: CGPoint(x: 120,y: 100))
+    expect(imageInfo?.kind == "image" && imageInfo?.pixelSize?.width == 16,"inserted image is a real PDF content object")
+    let imageDoc = PDFDocument(data: imageData)!
+    expect((imageDoc.page(at: 1)?.string ?? "").contains("Hello annotation"),"image insertion preserves neighboring text")
+    expect(imageDoc.dataRepresentation() != nil,"inserted image survives PDFKit persistence")
+    coordinator.detach()
+    print("PASS: colored markup, vector drawings, notes, stamps, links, forms, bookmarks/TOC, fixed dock widths, and PDF image insertion")
 }

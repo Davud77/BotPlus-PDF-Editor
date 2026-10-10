@@ -9,8 +9,8 @@ cleanup() {
   exit "$result"
 }
 trap cleanup EXIT
-[[ "$(uname -s)" == Darwin && "$(uname -m)" == arm64 ]] || {
-  printf 'Native checks require an Apple Silicon Mac.\n' >&2
+[[ "$(uname -s)" == Darwin ]] || {
+  printf 'Native checks require macOS.\n' >&2
   exit 1
 }
 sed '/^@main$/d' "$PROJECT_ROOT/ContentView.swift" > "$CHECK_DIRECTORY/NativeChecks.swift"
@@ -18,10 +18,10 @@ cat "$PROJECT_ROOT/PDFiumSourceEditor.swift" >> "$CHECK_DIRECTORY/NativeChecks.s
 cat "$PROJECT_ROOT/PDFTextEditingUI.swift" >> "$CHECK_DIRECTORY/NativeChecks.swift"
 cat "$PROJECT_ROOT/Tests/NativeChecksMain.swift" >> "$CHECK_DIRECTORY/NativeChecks.swift"
 mkdir -p "$CHECK_DIRECTORY/Modules" "$CHECK_DIRECTORY/ClangModules"
-clang -target arm64-apple-macos14.0 -I "$PROJECT_ROOT/Vendor/PDFium/include" -I "$PROJECT_ROOT/Native/PDFiumBridge/include" -c "$PROJECT_ROOT/Native/PDFiumBridge/PDFiumSave.c" -o "$CHECK_DIRECTORY/PDFiumSave.o"
+clang -target "$(uname -m)-apple-macos14.0" -I "$PROJECT_ROOT/Vendor/PDFium/include" -I "$PROJECT_ROOT/Native/PDFiumBridge/include" -c "$PROJECT_ROOT/Native/PDFiumBridge/PDFiumSave.c" -o "$CHECK_DIRECTORY/PDFiumSave.o"
 SWIFT_MODULE_CACHE_PATH="$CHECK_DIRECTORY/Modules" \
 CLANG_MODULE_CACHE_PATH="$CHECK_DIRECTORY/ClangModules" \
-swiftc -swift-version 6 -parse-as-library -target arm64-apple-macos14.0 \
+swiftc -swift-version 6 -parse-as-library -target "$(uname -m)-apple-macos14.0" \
   -module-cache-path "$CHECK_DIRECTORY/Modules" \
   -I "$PROJECT_ROOT/Native/PDFiumBridge/include" -Xcc -I"$PROJECT_ROOT/Vendor/PDFium/include" \
   -L "$PROJECT_ROOT/Vendor/PDFium/lib" -lpdfium -Xlinker -rpath -Xlinker "$PROJECT_ROOT/Vendor/PDFium/lib" \

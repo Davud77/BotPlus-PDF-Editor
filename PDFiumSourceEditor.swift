@@ -1119,3 +1119,60 @@ enum PDFFontCatalog {
         return url
     }
 }
+
+@MainActor
+extension PDFSourceSession {
+    static func insertingImage(data: Data,pageIndex: Int,image: CGImage,bounds: CGRect) throws -> Data {
+        guard image.width > 0,image.height > 0,image.width <= 16_384,image.height <= 16_384 else { throw PDFSourceError.content }
+        let handle = try PDFiumDocumentHandle(data: data,pageIndex: pageIndex)
+        let factor = min(1,4096/Double(max(image.width,image.height)))
+        let pixelWidth = max(1,Int((Double(image.width)*factor).rounded())),pixelHeight = max(1,Int((Double(image.height)*factor).rounded()))
+        guard let bitmap = FPDFBitmap_CreateEx(Int32(pixelWidth),Int32(pixelHeight),FPDFBitmap_BGRA,nil,0) else { throw PDFSourceError.content }
+        defer { FPDFBitmap_Destroy(bitmap) }
+        guard let buffer = FPDFBitmap_GetBuffer(bitmap),let context = CGContext(data: buffer,width: pixelWidth,height: pixelHeight,bitsPerComponent: 8,bytesPerRow: Int(FPDFBitmap_GetStride(bitmap)),space: CGColorSpaceCreateDeviceRGB(),bitmapInfo: CGImageAlphaInfo.premultipliedFirst.rawValue|CGBitmapInfo.byteOrder32Little.rawValue) else { throw PDFSourceError.content }
+        context.clear(CGRect(x: 0,y: 0,width: pixelWidth,height: pixelHeight))
+        context.translateBy(x: 0,y: CGFloat(pixelHeight)); context.scaleBy(x: 1,y: -1)
+        context.draw(image,in: CGRect(x: 0,y: 0,width: pixelWidth,height: pixelHeight))
+        // Quartz emits premultiplied bytes; the AGG PDFium bitmap format
+        // requires independent color components. Preserve PNG edge alpha.
+        let pixels = buffer.assumingMemoryBound(to: UInt8.self),stride = Int(FPDFBitmap_GetStride(bitmap))
+        for row in 0..<pixelHeight { for column in 0..<pixelWidth {
+            let offset = row*stride+column*4,alpha = Int(pixels[offset+3])
+            if alpha > 0 && alpha < 255 { for channel in 0..<3 { pixels[offset+channel] = UInt8(min(255,(Int(pixels[offset+channel])*255+alpha/2)/alpha)) } }
+        } }
+        guard let object = FPDFPageObj_NewImageObj(handle.document) else { throw PDFSourceError.content }
+        var page: FPDF_PAGE? = handle.page
+        guard FPDFImageObj_SetBitmap(&page,1,object,bitmap) != 0,
+              FPDFImageObj_SetMatrix(object,Double(bounds.width),0,0,Double(bounds.height),Double(bounds.minX),Double(bounds.minY)) != 0 else { FPDFPageObj_Destroy(object); throw PDFSourceError.content }
+        FPDFPage_InsertObject(handle.page,object)
+        guard FPDFPage_GenerateContent(handle.page) != 0 else { throw PDFSourceError.content }
+        var length = 0; guard let bytes = BotPlusPDFium_SaveDocument(handle.document,&length),length > 0 else { throw PDFSourceError.save }
+        defer { BotPlusPDFium_Free(bytes) }; return Data(bytes: bytes,count: length)
+    }
+}
+
+@MainActor
+extension PDFSourceSession {
+    static func validEmptyPageStreams(_ data: Data) throws -> Data {
+        guard let provider = CGDataProvider(data: data as CFData),let reference = CGPDFDocument(provider) else { throw PDFSourceError.document }
+        var empty: [Int] = []
+        for index in 1...max(1,reference.numberOfPages) {
+            guard let page = reference.page(at: index),let dictionary = page.dictionary else { continue }
+            var array: CGPDFArrayRef?
+            if CGPDFDictionaryGetArray(dictionary,"Contents",&array),let array,CGPDFArrayGetCount(array) == 0 { empty.append(index-1) }
+        }
+        guard !empty.isEmpty else { return data }
+        _ = PDFiumRuntime.ready; let storage = data as NSData
+        guard let document = FPDF_LoadMemDocument64(storage.bytes,storage.length,nil) else { throw PDFSourceError.document }
+        defer { FPDF_CloseDocument(document) }
+        for index in empty {
+            guard let page = FPDF_LoadPage(document,Int32(index)) else { throw PDFSourceError.page }
+            defer { FPDF_ClosePage(page) }
+            guard let path = FPDFPageObj_CreateNewRect(0,0,0.01,0.01) else { throw PDFSourceError.content }
+            _ = FPDFPageObj_SetFillColor(path,0,0,0,0); _ = FPDFPath_SetDrawMode(path,FPDF_FILLMODE_WINDING,0); FPDFPage_InsertObject(page,path)
+            guard FPDFPage_GenerateContent(page) != 0 else { throw PDFSourceError.content }
+        }
+        var length = 0; guard let bytes = BotPlusPDFium_SaveDocument(document,&length),length > 0 else { throw PDFSourceError.save }
+        defer { BotPlusPDFium_Free(bytes) }; return Data(bytes: bytes,count: length)
+    }
+}
