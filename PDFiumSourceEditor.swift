@@ -527,7 +527,7 @@ final class PDFSourceSession {
                 codes[scalar] = cid
                 while glyphMap.count < (Int(glyph)+1)*2 { glyphMap.append(0) }
                 glyphMap[Int(glyph)*2] = UInt8(glyph >> 8); glyphMap[Int(glyph)*2+1] = UInt8(glyph & 255)
-                mappings.append(String(format: "<%04X> <%@>",cid,units.map { String(format: "%04X",$0) }.joined()))
+                mappings.append(String(format: "<%04X> <%@>",UInt32(cid),units.map { String(format: "%04X",UInt32($0)) }.joined()))
             }
             var cmap = "/CIDInit /ProcSet findresource begin\n12 dict begin\nbegincmap\n/CIDSystemInfo << /Registry (Adobe) /Ordering (Identity) /Supplement 0 >> def\n/CMapName /BotPlusUnicode def\n/CMapType 2 def\n1 begincodespacerange\n<0000> <FFFF>\nendcodespacerange\n"
             for start in stride(from: 0,to: mappings.count,by: 100) {
@@ -889,7 +889,7 @@ private enum PDFContentNormalizer {
         output.append(Data("\(streamID) 0 obj\n<< /Length \(joined.count) >>\nstream\n".utf8)); output.append(joined)
         output.append(Data("\nendstream\nendobj\n".utf8))
         let xrefOffset = output.count
-        var xref = "xref\n\(pageReference.0) 1\n"+String(format: "%010lld %05d n \n",Int64(pageOffset),pageReference.1)
+        var xref = "xref\n\(pageReference.0) 1\n"+String(format: "%010lld %05d n \n",Int64(pageOffset),Int32(pageReference.1))
         xref += "\(streamID) 1\n"+String(format: "%010lld 00000 n \n",Int64(streamOffset))
         xref += "trailer\n<< /Size \(streamID+1) /Root \(root.0) \(root.1) R /Prev \(start)"
         output.append(Data(xref.utf8))
@@ -1174,5 +1174,38 @@ extension PDFSourceSession {
         }
         var length = 0; guard let bytes = BotPlusPDFium_SaveDocument(document,&length),length > 0 else { throw PDFSourceError.save }
         defer { BotPlusPDFium_Free(bytes) }; return Data(bytes: bytes,count: length)
+    }
+}
+
+/// Reads the existing PDF text layer only. This reader never performs OCR and
+/// does not require the source-content editing normalizer or editing rights.
+@MainActor
+enum PDFSourceTextReader {
+    static func pages(data: Data,indices: [Int]? = nil) throws -> [String] {
+        _ = PDFiumRuntime.ready
+        let storage = data as NSData
+        return try withExtendedLifetime(storage) {
+            guard let document = FPDF_LoadMemDocument64(storage.bytes,storage.length,nil) else { throw PDFSourceError.document }
+            defer { FPDF_CloseDocument(document) }
+            guard FPDF_GetDocPermissions(document) & (1 << 4) != 0 else { throw PDFSourceError.permission }
+            let count = Int(FPDF_GetPageCount(document))
+            return try (indices ?? Array(0..<count)).map { index in
+                guard index >= 0,index < count,let page = FPDF_LoadPage(document,Int32(index)) else { throw PDFSourceError.page }
+                defer { FPDF_ClosePage(page) }
+                guard let textPage = FPDFText_LoadPage(page) else { return "" }
+                defer { FPDFText_ClosePage(textPage) }
+                let characters = FPDFText_CountChars(textPage)
+                guard characters >= 0,characters <= 10_000_000 else { throw PDFSourceError.content }
+                guard characters > 0 else { return "" }
+                // GetText uses UCS-2 and can omit non-BMP characters. GetUnicode
+                // supplies the full scalar, including generated line breaks.
+                var scalars = String.UnicodeScalarView()
+                scalars.reserveCapacity(Int(characters))
+                for index in 0..<characters {
+                    if let scalar = UnicodeScalar(FPDFText_GetUnicode(textPage,index)),scalar.value != 0 { scalars.append(scalar) }
+                }
+                return String(scalars)
+            }
+        }
     }
 }

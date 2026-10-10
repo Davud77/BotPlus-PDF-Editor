@@ -7,7 +7,7 @@ import UniformTypeIdentifiers
 
 private enum BotPlusBrand {
     static let name = "BotPlus PDF Editor"
-    static let version = "1.1"
+    static let version = "1.1.1"
     static let copyright = "© 2026 BotPlus"
     static let supportURL = URL(string: "https://github.com/Davud77/BotPlus-PDF-Editor")!
     static let telegramURL = URL(string: "https://t.me/botplus_pdf")!
@@ -230,6 +230,7 @@ private final class PanelWorkspaceModel: NSObject, ObservableObject, NSWindowDel
     @Published private(set) var activeRight: WorkspacePanel = .properties
     private var floatingWindows: [WorkspacePanel: NSPanel] = [:]
     private var suppressedClose = Set<ObjectIdentifier>()
+    private var floatingSyncPending = false
     private var resizeStarts: [WorkspacePanel: CGFloat] = [:]
     private let persistenceKey = "BotPlusPDFEditor.panelConfigurations.v1"
     override init() {
@@ -326,6 +327,13 @@ private final class PanelWorkspaceModel: NSObject, ObservableObject, NSWindowDel
         if let data = try? JSONEncoder().encode(next) { UserDefaults.standard.set(data, forKey: persistenceKey) }
     }
     func synchronizeFloatingWindows(manager: DocumentManager) {
+        guard !floatingSyncPending else { return }; floatingSyncPending = true
+        DispatchQueue.main.async { [weak self,weak manager] in
+            guard let self else { return }; self.floatingSyncPending = false
+            guard let manager else { return }; self.applyFloatingWindows(manager: manager)
+        }
+    }
+    private func applyFloatingWindows(manager: DocumentManager) {
         for panel in WorkspacePanel.allCases {
             let config = configuration(for: panel)
             if config.isVisible && config.dock == .floating {
@@ -353,12 +361,19 @@ private final class PanelWorkspaceModel: NSObject, ObservableObject, NSWindowDel
         guard let window = notification.object as? NSWindow else { return }
         if suppressedClose.remove(ObjectIdentifier(window)) != nil { return }
         guard let panel = floatingWindows.first(where: { $0.value === window })?.key else { return }
-        floatingWindows[panel] = nil; setDock(configuration(for: panel).lastDock, for: panel)
+        floatingWindows[panel] = nil
+        DispatchQueue.main.async { [weak self] in
+            guard let self,self.configuration(for: panel).dock == .floating else { return }
+            self.setDock(self.configuration(for: panel).lastDock,for: panel)
+        }
     }
     func windowDidResize(_ notification: Notification) {
         guard let window = notification.object as? NSWindow,
               let panel = floatingWindows.first(where: { $0.value === window })?.key else { return }
-        setWidth(window.frame.width, for: panel)
+        DispatchQueue.main.async { [weak self,weak window] in
+            guard let self,let window,self.floatingWindows[panel] === window else { return }
+            self.setWidth(window.frame.width,for: panel)
+        }
     }
 }
 
@@ -392,6 +407,10 @@ private final class DocumentManager: ObservableObject {
     }
     @Published var thumbnailZoom = 0.55
     @Published var thumbnailGestureActive = false
+    private var embeddedTextDocument: ObjectIdentifier?
+    private var embeddedTextRevision = -1
+    private var embeddedTextData: Data?
+    private var embeddedTextCache: [Int:String] = [:]
     var contentRevision = 0
     @Published var selectedOutline: PDFOutline?
     @Published var stampText = "СОГЛАСОВАНО"
@@ -767,7 +786,7 @@ private struct ContentView: View {
         .ignoresSafeArea(.container, edges: .top)
         .onReceive(NotificationCenter.default.publisher(for: .requestOpenPDF)) { _ in manager.openPanel() }
         .onReceive(manager.panels.$configurations) { _ in
-            DispatchQueue.main.async { manager.panels.synchronizeFloatingWindows(manager: manager) }
+            manager.panels.synchronizeFloatingWindows(manager: manager)
         }
         .onChange(of: manager.language) { _, _ in manager.panels.synchronizeFloatingWindows(manager: manager) }
         .onChange(of: manager.theme) { _, _ in manager.panels.synchronizeFloatingWindows(manager: manager) }
@@ -1714,7 +1733,7 @@ private struct RulerBar: View {
                     context.stroke(tick, with: .color(Palette.rulerTicks), lineWidth: 1)
                     if majorTick {
                         let digits = major >= 1 ? 0 : (major >= 0.1 ? 1 : 2)
-                        let label = Text(String(format: "%.*f", digits, abs(value) < minor / 2 ? 0 : value)).font(.system(size: 8)).foregroundColor(Palette.rulerText)
+                        let label = Text(verbatim: RulerLabelFormatter.label(value: value,minorInterval: minor,digits: digits,language: manager.language)).font(.system(size: 8)).foregroundColor(Palette.rulerText)
                         if horizontal { context.draw(label, at: CGPoint(x: pixel + 3, y: 2), anchor: .topLeading) }
                         else {
                             var rotated = context; rotated.translateBy(x: 8, y: pixel + 3); rotated.rotate(by: .degrees(90))
@@ -1731,6 +1750,16 @@ private struct RulerBar: View {
                 context.stroke(marker, with: .color(Palette.accent), lineWidth: 1)
             }
         }.accessibilityLabel("\(manager.language == .ru ? "Линейка" : "Ruler") \(manager.rulerUnit.rawValue)")
+    }
+}
+
+private enum RulerLabelFormatter {
+    static func label(value: CGFloat,minorInterval: CGFloat,digits: Int,language: AppLanguage) -> String {
+        guard value.isFinite,minorInterval.isFinite else { return "" }
+        let number: Double = abs(value) < abs(minorInterval)/2 ? 0 : Double(value)
+        return number.formatted(.number.grouping(.never)
+            .precision(.fractionLength(min(6,max(0,digits))))
+            .locale(Locale(identifier: language == .ru ? "ru_RU" : "en_US_POSIX")))
     }
 }
 
@@ -1776,7 +1805,7 @@ private struct PDFViewer: NSViewRepresentable {
         view.pageShadowsEnabled = true
         view.autoScales = false
         view.minScaleFactor = 0.05; view.maxScaleFactor = 20
-        disableLiveTextIfAvailable(on: view)
+        view.enableDataDetectors = false
         context.coordinator.attach(view)
         return view
     }
@@ -1788,15 +1817,6 @@ private struct PDFViewer: NSViewRepresentable {
     static func dismantleNSView(_ nsView: PDFViewerView, coordinator: Coordinator) {
         coordinator.detach()
         nsView.stopEventMonitoring()
-    }
-
-    private func disableLiveTextIfAvailable(on view: PDFViewerView) {
-        // Some SDK/runtime combinations expose this PDFView selector and others do not.
-        // Call it only when present so the single source file builds against public SDKs.
-        let setter = NSSelectorFromString("setLiveTextInteractionEnabled:")
-        guard view.responds(to: setter), let implementation = view.method(for: setter) else { return }
-        typealias BooleanSetter = @convention(c) (AnyObject, Selector, Bool) -> Void
-        unsafeBitCast(implementation, to: BooleanSetter.self)(view, setter, false)
     }
 
     @MainActor
@@ -1895,8 +1915,9 @@ private struct PDFViewer: NSViewRepresentable {
             observationTokens.removeAll()
             if let clipToken { NotificationCenter.default.removeObserver(clipToken) }
             clipToken = nil; observedClip = nil
-            textPopover?.close(); textPopover = nil
-            view?.sourceInline?.cancel(); view?.sourceInline = nil
+            let closing = textPopover; textPopover = nil
+            let inline = view?.sourceInline; view?.sourceInline = nil
+            DispatchQueue.main.async { closing?.close(); inline?.cancel() }
         }
         private func observeScroll(in view: PDFViewerView) {
             guard let clip = view.internalScrollView?.contentView, clip !== observedClip else { return }
@@ -1937,6 +1958,7 @@ private struct PDFViewer: NSViewRepresentable {
                     if let page = item.document.page(at: item.pageIndex) { view.go(to: page) }
                 }
             }
+            if view.enableDataDetectors { view.enableDataDetectors = false }
             if view.displayMode != manager.layout.pdfMode { view.displayMode = manager.layout.pdfMode; changed = true }
             if view.displaysAsBook != (manager.layout == .spread) { view.displaysAsBook = manager.layout == .spread; changed = true }
             if view.activeTool != manager.tool { view.activeTool = manager.tool; changed = true }
@@ -2401,21 +2423,24 @@ private struct PDFViewer: NSViewRepresentable {
                 view?.updateCalloutLeader(for: annotation)
                 view?.refreshOverlay(); view?.setNeedsDisplay(view?.bounds ?? .zero)
             }
-            editor.onFinish = { [weak self, weak view] cancelled in
-                if isNew && (cancelled || (annotation.contents ?? "").trimmingCharacters(in: .whitespacesAndNewlines).isEmpty) {
-                    page.removeAnnotation(annotation)
-                    if let leader { page.removeAnnotation(leader) }
-                    view?.selectAnnotation(nil)
+            editor.onFinish = { [weak self,weak view,weak popover] cancelled in
+                DispatchQueue.main.async { [weak self,weak view,weak popover] in
+                    if isNew && (cancelled || (annotation.contents ?? "").trimmingCharacters(in: .whitespacesAndNewlines).isEmpty) {
+                        page.removeAnnotation(annotation)
+                        if let leader { page.removeAnnotation(leader) }
+                        if view?.selectedAnnotation === annotation { view?.selectAnnotation(nil) }
+                    }
+                    view?.updateCalloutLeader(for: annotation)
+                    view?.refreshOverlay(); view?.setNeedsDisplay(view?.bounds ?? .zero)
+                    Task { @MainActor [weak self] in
+                        await Task.yield()
+                        self?.manager.send(.refresh)
+                    }
+                    if self?.textPopover === popover { self?.textPopover = nil }
                 }
-                view?.updateCalloutLeader(for: annotation)
-                view?.refreshOverlay(); view?.setNeedsDisplay(view?.bounds ?? .zero)
-                Task { @MainActor [weak self] in
-                    await Task.yield()
-                    self?.manager.send(.refresh)
-                }
-                self?.textPopover = nil
             }
             popover.behavior = .transient
+            popover.animates = false
             popover.contentSize = NSSize(width: 360, height: 255)
             popover.contentViewController = editor; popover.delegate = editor; editor.popover = popover
             textPopover = popover
@@ -2580,6 +2605,14 @@ private final class FreeTextEditorController: NSViewController, NSTextViewDelega
         let scroll = NSScrollView(frame: NSRect(x: 12, y: 136, width: 336, height: 105))
         scroll.borderType = .bezelBorder; scroll.hasVerticalScroller = true
         textView.isRichText = false; textView.delegate = self
+        textView.isAutomaticTextCompletionEnabled = false
+        textView.isAutomaticSpellingCorrectionEnabled = false
+        textView.isContinuousSpellCheckingEnabled = false
+        textView.isAutomaticLinkDetectionEnabled = false
+        textView.isAutomaticQuoteSubstitutionEnabled = false
+        textView.isAutomaticDashSubstitutionEnabled = false
+        textView.isAutomaticTextReplacementEnabled = false
+        if #available(macOS 15.0,*) { textView.writingToolsBehavior = .none }
         textView.string = annotation.contents ?? ""
         textView.font = annotation.font ?? NSFont.systemFont(ofSize: 18)
         textView.textColor = .labelColor
@@ -2630,13 +2663,15 @@ private final class FreeTextEditorController: NSViewController, NSTextViewDelega
     @objc private func cancelEditing() { cancelled = true; popover?.close() }
     func popoverDidClose(_ notification: Notification) {
         guard !finished else { return }; finished = true
-        if cancelled {
-            annotation.contents = originalContents; annotation.font = originalFont
-            annotation.color = originalColor; annotation.fontColor = originalFontColor
-            annotation.border = originalBorder; annotation.bounds = originalBounds
-            AnnotationMetadata.setOpacity(Double(originalOpacity), on: annotation)
-        } else { applyControls() }
-        onFinish?(cancelled)
+        DispatchQueue.main.async { [self] in
+            if cancelled {
+                annotation.contents = originalContents; annotation.font = originalFont
+                annotation.color = originalColor; annotation.fontColor = originalFontColor
+                annotation.border = originalBorder; annotation.bounds = originalBounds
+                AnnotationMetadata.setOpacity(Double(originalOpacity), on: annotation)
+            } else { applyControls() }
+            onFinish?(cancelled)
+        }
     }
 }
 
@@ -3158,17 +3193,20 @@ private enum PDFDialogs {
             }
             stack.frame = CGRect(x: 0,y: 0,width: 340,height: CGFloat(fields.count*52)); alert.accessoryView = stack
             alert.beginSheetModal(for: window) { response in
-                if response == .alertFirstButtonReturn { completion(inputs.map(\.stringValue)) }
+                if response == .alertFirstButtonReturn {
+                    let values = inputs.map(\.stringValue)
+                    DispatchQueue.main.async { completion(values) }
+                }
             }
         }
     }
     static func save(_ name: String, type: UTType, completion: @escaping (URL) -> Void) {
         let panel = NSSavePanel(); panel.allowedContentTypes = [type]; panel.nameFieldStringValue = name
-        panel.begin { response in if response == .OK,let url = panel.url { completion(url) } }
+        panel.begin { response in if response == .OK,let url = panel.url { DispatchQueue.main.async { completion(url) } } }
     }
     static func open(_ types: [UTType], completion: @escaping ([URL]) -> Void) {
         let panel = NSOpenPanel(); panel.allowedContentTypes = types; panel.allowsMultipleSelection = true
-        panel.begin { response in if response == .OK { completion(panel.urls) } }
+        panel.begin { response in if response == .OK { let urls = panel.urls; DispatchQueue.main.async { completion(urls) } } }
     }
 }
 
@@ -3179,6 +3217,26 @@ private extension DocumentManager {
         let entry = PDFDocumentItem(url: FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString+".pdf"),document: document); entry.isUntitled = true; insertDocument(entry)
     }
     func insertDocument(_ entry: PDFDocumentItem) { documents.append(entry); select(entry.id) }
+    func embeddedText(in item: PDFDocumentItem,indices: [Int]) -> String? {
+        guard item.document.allowsCopying else { say("Text copying is not permitted.","Документ запрещает копирование текста."); return nil }
+        do {
+            let identity = ObjectIdentifier(item.document)
+            if identity != embeddedTextDocument || embeddedTextRevision != contentRevision {
+                embeddedTextDocument = identity; embeddedTextRevision = contentRevision
+                embeddedTextCache = [:]; embeddedTextData = nil
+            }
+            let missing = indices.filter { embeddedTextCache[$0] == nil }
+            if !missing.isEmpty {
+                if embeddedTextData == nil { embeddedTextData = try PDFDocumentSerializer.data(item.document) }
+                guard let data = embeddedTextData else { return nil }
+                let pages = try PDFSourceTextReader.pages(data: data,indices: missing)
+                for (index,text) in zip(missing,pages) { embeddedTextCache[index] = text }
+            }
+            return indices.compactMap { embeddedTextCache[$0] }.joined(separator: "\n")
+        } catch {
+            say("Could not read the existing PDF text layer.","Не удалось прочитать текстовый слой PDF."); return nil
+        }
+    }
     func activateMarkup(_ next: PDFTool) {
         guard finishSourceEditing?() != false else { return }
         if ![PDFTool.highlight,.underline,.strike].contains(tool) {
@@ -3322,12 +3380,12 @@ private extension PDFViewer.Coordinator {
         case "list","showComments": manager.panels.toggleDrawer(.comments)
         case "deleteComment": _ = view.deleteSelectedAnnotation()
         case "wordCount":
-            let text = (0..<item.pageCount).compactMap { item.document.page(at: $0)?.string }.joined(separator: "\n")
+            guard let text = manager.embeddedText(in: item,indices: Array(0..<item.pageCount)) else { return }
             let count = text.split { $0.isWhitespace || $0.isNewline }.count
             manager.say("Words: \(count); characters: \(text.count)","Слов: \(count); знаков: \(text.count)")
         case "read":
             if manager.speech.isPaused { manager.speech.continueSpeaking() }
-            else if !manager.speech.isSpeaking,let text = page?.string {
+            else if !manager.speech.isSpeaking,let page,let text = manager.embeddedText(in: item,indices: [item.document.index(for: page)]),!text.isEmpty {
                 let utterance = AVSpeechUtterance(string: text); utterance.voice = AVSpeechSynthesisVoice(language: manager.language == .ru ? "ru-RU" : "en-US"); manager.speech.speak(utterance)
             }
         case "pauseRead": manager.speech.pauseSpeaking(at: .word)
@@ -3335,7 +3393,7 @@ private extension PDFViewer.Coordinator {
         case "bookmarkDelete": if let node = manager.selectedOutline { manager.deleteBookmark(node) }
         case "bookmarkFromPageText":
             guard let page else { return }
-            let title = view.currentSelection?.string ?? page.string?.split(separator: "\n").first.map(String.init) ?? "Page \(item.pageIndex+1)"
+            let title = view.currentSelection?.string ?? manager.embeddedText(in: item,indices: [item.document.index(for: page)])?.split(separator: "\n").first.map(String.init) ?? "Page \(item.pageIndex+1)"
             manager.addBookmark(title: String(title.prefix(160)),page: page); manager.panels.select(.bookmarks)
         case "bookmarkEveryN":
             PDFDialogs.prompt(manager.language == .ru ? "Закладки через N страниц" : "Bookmarks every N pages",fields: [("N","1"),(manager.language == .ru ? "Префикс" : "Prefix",manager.language == .ru ? "Страница" : "Page")]) { [weak self] values in
@@ -3344,7 +3402,7 @@ private extension PDFViewer.Coordinator {
                 self.manager.panels.select(.bookmarks)
             }
         case "bookmarkFromTOC":
-            guard let text = page?.string else { return }
+            guard let page,let text = manager.embeddedText(in: item,indices: [item.document.index(for: page)]) else { return }
             let regex = try! NSRegularExpression(pattern: "^(.+?)\\s*[.·…\\s]+(\\d+)\\s*$")
             var added = 0
             for line in text.components(separatedBy: .newlines) {
@@ -3519,7 +3577,7 @@ private extension PDFViewer.Coordinator {
                 for index in 0..<item.pageCount {
                     guard let source = item.document.page(at: index),let copy = source.copy() as? PDFPage else { failed = true; continue }
                     AnnotationMetadata.copy(from: source,to: copy); let doc = PDFDocument(); doc.insert(copy,at: 0); AnnotationMetadata.prepareForSave(doc)
-                    var url = folder.appendingPathComponent(String(format: "Page-%03d.pdf",index+1))
+                    var url = folder.appendingPathComponent(String(format: "Page-%03d.pdf",Int32(index+1)))
                     if FileManager.default.fileExists(atPath: url.path) { url = folder.appendingPathComponent("Page-\(index+1)-"+UUID().uuidString.prefix(6)+".pdf") }
                     if !doc.write(to: url) { failed = true }
                 }; self?.manager.say(failed ? "Some pages could not be exported" : "Pages split into separate PDF files",failed ? "Не все страницы удалось экспортировать" : "Страницы сохранены отдельными PDF")
@@ -3543,7 +3601,7 @@ private extension PDFViewer.Coordinator {
                     guard let page = item.document.page(at: index) else { continue }; let box = page.bounds(for: .cropBox)
                     let scale = min(2,4096/max(box.width,box.height)); let image = PDFRasterizer.image(page,size: CGSize(width: box.width*scale,height: box.height*scale))
                     guard let tiff = image.tiffRepresentation,let bitmap = NSBitmapImageRep(data: tiff),let png = bitmap.representation(using: .png,properties: [:]) else { continue }
-                    var url = folder.appendingPathComponent(String(format:"Page-%03d.png",index+1))
+                    var url = folder.appendingPathComponent(String(format:"Page-%03d.png",Int32(index+1)))
                     if FileManager.default.fileExists(atPath: url.path) { url = folder.appendingPathComponent("Page-\(index+1)-"+UUID().uuidString.prefix(6)+".png") }
                     try png.write(to: url)
                 }; self?.manager.say("Images exported","Изображения экспортированы")
@@ -3579,7 +3637,7 @@ private extension PDFViewer.Coordinator {
             guard let self,let view else { return }
             for index in 0..<item.pageCount { guard let page = item.document.page(at: index) else { continue }; let crop = page.bounds(for: .cropBox),watermark = id == "watermark"
                 let rect = CGRect(x: crop.minX+20,y: watermark ? crop.midY-25 : crop.maxY-40,width: crop.width-40,height: 30)
-                let annotation = PDFAnnotation(bounds: rect,forType: .freeText,withProperties: nil); annotation.contents = values[0]+(id == "bates" ? String(format:"-%06d",index+1) : ""); annotation.color = .clear; annotation.fontColor = NSColor(self.manager.annotationColor).withAlphaComponent(watermark ? 0.2 : 1); annotation.font = NSFont.boldSystemFont(ofSize: watermark ? 28 : 12); annotation.alignment = .center; AnnotationMetadata.setOpacity(watermark ? 0.2 : 1,on: annotation); page.addAnnotation(annotation)
+                let annotation = PDFAnnotation(bounds: rect,forType: .freeText,withProperties: nil); annotation.contents = values[0]+(id == "bates" ? String(format:"-%06d",Int32(index+1)) : ""); annotation.color = .clear; annotation.fontColor = NSColor(self.manager.annotationColor).withAlphaComponent(watermark ? 0.2 : 1); annotation.font = NSFont.boldSystemFont(ofSize: watermark ? 28 : 12); annotation.alignment = .center; AnnotationMetadata.setOpacity(watermark ? 0.2 : 1,on: annotation); page.addAnnotation(annotation)
             }; view.setNeedsDisplay(view.bounds); self.manager.send(.refresh)
         }
     }

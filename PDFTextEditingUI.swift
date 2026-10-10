@@ -121,6 +121,11 @@ final class PDFInlineTextEditor: NSObject, NSTextViewDelegate {
         editor.textContainer?.widthTracksTextView = true
         editor.isAutomaticQuoteSubstitutionEnabled = false; editor.isAutomaticDashSubstitutionEnabled = false
         editor.isAutomaticTextReplacementEnabled = false
+        editor.isAutomaticTextCompletionEnabled = false
+        editor.isAutomaticSpellingCorrectionEnabled = false
+        editor.isContinuousSpellCheckingEnabled = false
+        editor.isAutomaticLinkDetectionEnabled = false
+        if #available(macOS 15.0,*) { editor.writingToolsBehavior = .none }
         editor.textStorage?.setAttributedString(snapshot.attributedText)
         if editor.string.isEmpty {
             let font = NSFont(name: snapshot.fontName,size: snapshot.fontSize) ?? NSFont.systemFont(ofSize: snapshot.fontSize)

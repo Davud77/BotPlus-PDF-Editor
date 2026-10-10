@@ -74,6 +74,19 @@ struct NativeChecks {
         expect(manager.rulerMetrics != beforeZoom, "PDF scale updates ruler derivative")
         expect(abs(RulerUnit.millimeters.pointsPerUnit * 25.4 - 72) < 0.00001, "mm conversion")
         expect(RulerUnit.inches.pointsPerUnit == 72, "inch conversion")
+        for _ in 0..<1104 {
+            expect(RulerLabelFormatter.label(value: 0,minorInterval: 1,digits: 0,language: .en) == "0","ruler zero label")
+            expect(RulerLabelFormatter.label(value: 1.25,minorInterval: 0.01,digits: 2,language: .en) == "1.25","ruler fractional label")
+        }
+        expect(RulerLabelFormatter.label(value: -0.00001,minorInterval: 0.1,digits: 2,language: .en) == "0.00","ruler suppresses negative zero")
+        expect(RulerLabelFormatter.label(value: 1.25,minorInterval: 0.01,digits: 2,language: .ru) == "1,25","ruler follows selected Russian locale")
+        expect(RulerLabelFormatter.label(value: -1000,minorInterval: 1,digits: 0,language: .en) == "-1000","ruler negative coordinate has no group separator")
+        expect(RulerLabelFormatter.label(value: .infinity,minorInterval: 1,digits: 0,language: .en).isEmpty,"invalid ruler geometry is not formatted")
+        let blankText = try PDFSourceTextReader.pages(data: Data(contentsOf: initial))
+        expect(blankText == ["",""],"embedded-text reader keeps blank pages empty without OCR")
+        let rulerImage = ImageRenderer(content: RulerBar(axis: .horizontal,manager: manager).frame(width: 500,height: 24))
+        expect(rulerImage.cgImage != nil,"ruler Canvas renders numeric labels")
+        print("PASS: 1104 typed ruler label passes, RU/EN numbers and real Canvas rendering")
         let scrollBefore = clip.bounds.origin
         let wheelCG = CGEvent(scrollWheelEvent2Source: nil, units: .pixel, wheelCount: 1, wheel1: -40, wheel2: 0, wheel3: 0)!
         wheelCG.setIntegerValueField(.scrollWheelEventIsContinuous, value: 1)
@@ -478,6 +491,9 @@ private func runRibbonFeatureChecks(root: URL) throws {
     document.insert(first,at: 0); document.insert(PDFRasterizer.textPage("Second page")!,at: 1)
     let url = root.appendingPathComponent("ribbon-features.pdf"); expect(document.write(to: url),"create searchable source page")
     let manager = DocumentManager(); manager.open(url); let item = manager.selected!,page = item.document.page(at: 0)!
+    let textOnly = try PDFSourceTextReader.pages(data: Data(contentsOf: url),indices: [0])
+    expect(textOnly[0].contains("Hello annotation tools"),"embedded-text reader preserves source text without Vision")
+    expect(manager.embeddedText(in: item,indices: [0])?.contains("Hello annotation tools") == true,"document text commands use the existing text layer")
     let pdf = PDFViewerView(frame: CGRect(x: 0,y: 0,width: 600,height: 800))
     let featureWindow = NSWindow(contentRect: pdf.frame,styleMask: [.titled],backing: .buffered,defer: false)
     featureWindow.isReleasedWhenClosed = false; featureWindow.contentView = pdf
