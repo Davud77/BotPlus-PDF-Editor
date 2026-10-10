@@ -84,9 +84,19 @@ struct NativeChecks {
         expect(RulerLabelFormatter.label(value: .infinity,minorInterval: 1,digits: 0,language: .en).isEmpty,"invalid ruler geometry is not formatted")
         let blankText = try PDFSourceTextReader.pages(data: Data(contentsOf: initial))
         expect(blankText == ["",""],"embedded-text reader keeps blank pages empty without OCR")
-        let rulerImage = ImageRenderer(content: RulerBar(axis: .horizontal,manager: manager).frame(width: 500,height: 24))
-        expect(rulerImage.cgImage != nil,"ruler Canvas renders numeric labels")
-        print("PASS: 1104 typed ruler label passes, RU/EN numbers and real Canvas rendering")
+        var canRenderOffscreen = true
+        #if arch(x86_64)
+        // macos-15-intel is a headless VM: SwiftUI's offscreen renderer can
+        // abort inside MTLLoader after returning its image. Real Intel Macs
+        // still run this check; all numeric/PDF checks always run in CI.
+        canRenderOffscreen = ProcessInfo.processInfo.environment["CI"] != "true"
+        #endif
+        if canRenderOffscreen {
+            let rulerImage = ImageRenderer(content: RulerBar(axis: .horizontal,manager: manager).frame(width: 500,height: 24))
+            expect(rulerImage.cgImage != nil,"ruler Canvas renders numeric labels")
+            print("PASS: real ruler Canvas rendering")
+        } else { print("SKIP: offscreen SwiftUI Canvas on the Intel CI VM without a supported Metal device") }
+        print("PASS: 1104 typed ruler label passes and RU/EN numbers")
         let scrollBefore = clip.bounds.origin
         let wheelCG = CGEvent(scrollWheelEvent2Source: nil, units: .pixel, wheelCount: 1, wheel1: -40, wheel2: 0, wheel3: 0)!
         wheelCG.setIntegerValueField(.scrollWheelEventIsContinuous, value: 1)
