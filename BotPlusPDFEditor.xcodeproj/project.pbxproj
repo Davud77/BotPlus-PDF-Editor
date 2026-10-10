@@ -26,6 +26,7 @@
         A10000000000000000000011 /* libpdfium.dylib in Embed Frameworks */ = {isa = PBXBuildFile; fileRef = B10000000000000000000011; settings = {ATTRIBUTES = (CodeSignOnCopy, ); }; };
         A10000000000000000000012 /* PDFium licenses in Resources */ = {isa = PBXBuildFile; fileRef = B10000000000000000000012; };
         A10000000000000000000013 /* Third-party notices in Resources */ = {isa = PBXBuildFile; fileRef = B10000000000000000000013; };
+        A10000000000000000000014 /* PDFTextEditingUI.swift in Sources */ = {isa = PBXBuildFile; fileRef = B10000000000000000000014; };
 /* End PBXBuildFile section */
 
 /* Begin PBXFileReference section */
@@ -49,10 +50,11 @@
         B10000000000000000000011 /* libpdfium.dylib */ = {isa = PBXFileReference; lastKnownFileType = compiled.mach-o.dylib; path = Vendor/PDFium/lib/libpdfium.dylib; sourceTree = "<group>"; };
         B10000000000000000000012 /* PDFium licenses */ = {isa = PBXFileReference; lastKnownFileType = folder; path = Vendor/PDFium/licenses; sourceTree = "<group>"; };
         B10000000000000000000013 /* Third-party notices */ = {isa = PBXFileReference; lastKnownFileType = text; path = THIRD_PARTY_NOTICES.md; sourceTree = "<group>"; };
+        B10000000000000000000014 /* PDFTextEditingUI.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = PDFTextEditingUI.swift; sourceTree = "<group>"; };
 /* End PBXFileReference section */
 
 /* Begin PBXGroup section */
-		C10000000000000000000001 = {isa = PBXGroup; children = (B1000000000000000000000D /* ContentView.swift */, B1000000000000000000000F, B10000000000000000000010, B10000000000000000000011, B10000000000000000000012, B10000000000000000000013, C10000000000000000000002 /* BotPlusPDFEditor source files */, C10000000000000000000003 /* Products */,); sourceTree = "<group>"; };
+		C10000000000000000000001 = {isa = PBXGroup; children = (B1000000000000000000000D /* ContentView.swift */, B1000000000000000000000F, B10000000000000000000014, B10000000000000000000010, B10000000000000000000011, B10000000000000000000012, B10000000000000000000013, C10000000000000000000002 /* BotPlusPDFEditor source files */, C10000000000000000000003 /* Products */,); sourceTree = "<group>"; };
 		C10000000000000000000002 /* BotPlusPDFEditor source files */ = {isa = PBXGroup; path = BotPlusPDFEditor; sourceTree = "<group>"; children = (C10000000000000000000004 /* App */, C10000000000000000000005 /* Domain */, C10000000000000000000006 /* Application */, C10000000000000000000007 /* Infrastructure */, C10000000000000000000008 /* Presentation */,); };
 		C10000000000000000000003 /* Products */ = {isa = PBXGroup; name = Products; children = (B1000000000000000000000C /* BotPlusPDFEditor.app */,); sourceTree = "<group>"; };
 		C10000000000000000000004 /* App */ = {isa = PBXGroup; path = App; sourceTree = "<group>"; children = (B10000000000000000000001 /* BotPlusPDFEditorApp.swift */,); };
@@ -74,7 +76,7 @@
 /* End PBXBuildFile section */
 
 /* Begin PBXFrameworksBuildPhase section */
-		F10000000000000000000001 /* Sources */ = {isa = PBXSourcesBuildPhase; buildActionMask = 2147483647; files = (A1000000000000000000000C /* ContentView.swift in Sources */, A1000000000000000000000E, A1000000000000000000000F,); runOnlyForDeploymentPostprocessing = 0; };
+		F10000000000000000000001 /* Sources */ = {isa = PBXSourcesBuildPhase; buildActionMask = 2147483647; files = (A1000000000000000000000C /* ContentView.swift in Sources */, A1000000000000000000000E, A1000000000000000000000F, A10000000000000000000014,); runOnlyForDeploymentPostprocessing = 0; };
 		F10000000000000000000002 /* Frameworks */ = {isa = PBXFrameworksBuildPhase; buildActionMask = 2147483647; files = (A10000000000000000000010,); runOnlyForDeploymentPostprocessing = 0; };
 		F10000000000000000000003 /* Resources */ = {isa = PBXResourcesBuildPhase; buildActionMask = 2147483647; files = (A1000000000000000000000D /* Assets.xcassets in Resources */, A10000000000000000000012, A10000000000000000000013,); runOnlyForDeploymentPostprocessing = 0; };
         F10000000000000000000004 /* Embed Frameworks */ = {isa = PBXCopyFilesBuildPhase; buildActionMask = 2147483647; dstPath = ""; dstSubfolderSpec = 10; files = (A10000000000000000000011,); name = "Embed Frameworks"; runOnlyForDeploymentPostprocessing = 0; };

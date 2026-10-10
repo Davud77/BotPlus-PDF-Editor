@@ -46,7 +46,7 @@ xcodebuild -project BotPlusPDFEditor.xcodeproj \
   -derivedDataPath build/DerivedData build
 ```
 
-The UI and PDFKit coordinator are in `ContentView.swift`; source-text editing is in `PDFiumSourceEditor.swift` with a small C save bridge in `Native/PDFiumBridge`. The Xcode project includes the icon asset catalog and sandbox entitlements.
+The UI and PDFKit coordinator are in `ContentView.swift`; source-text editing is in `PDFiumSourceEditor.swift`, the in-page editor and properties panel in `PDFTextEditingUI.swift`, with a small C save bridge in `Native/PDFiumBridge`. The Xcode project includes the icon asset catalog and sandbox entitlements.
 
 ## App icon
 
@@ -64,7 +64,7 @@ The app defines no AppIntents types or shortcut declarations. Xcode may still in
 
 ## Workspace and editing
 
-Home → Objects → Edit PDF Text groups fragments into text blocks. Click once to select a block; double-click to edit it. Width changes word wrapping without scaling the font. Block identity, width and explicit line breaks are stored in PDF marked content for subsequent edits, with a hidden, non-printing metadata backup for PDFKit versions that discard private content tags. Unchanged character styles are retained; unavailable original fonts use a suitable installed system font. CAD duplicate drawing passes are de-duplicated for editing. Multi-stream pages are coalesced before rewriting to preserve cross-stream text state. Incomplete glyph writes are rejected without replacing the displayed document. Blocks are inferred geometrically; complex table layouts may need separate edits. Adjacent paragraphs are not reflowed. Scanned images without a text layer require OCR.
+Home → Objects → Edit PDF Text groups fragments into text blocks. All text blocks receive outlines. Click to edit directly on the page; double-click selects a word. The Properties panel formats the whole block or selected characters. Drag the cross to move, corners to scale, the circular handle to rotate, and side handles to stretch the field. Apply with the panel button or Cmd+Return; Escape cancels the current edit. Width changes word wrapping without scaling the font. Block identity, width and explicit line breaks are stored in PDF marked content for subsequent edits, with a hidden, non-printing metadata backup for PDFKit versions that discard private content tags. Unchanged character styles are retained; unavailable original fonts use a suitable installed system font. CAD duplicate drawing passes are de-duplicated for editing. Multi-stream pages are coalesced before rewriting to preserve cross-stream text state. Incomplete glyph writes are rejected without replacing the displayed document. Blocks are inferred geometrically; complex table layouts may need separate edits. Adjacent paragraphs are not reflowed. Scanned images without a text layer require OCR.
 
 Enable **View → Rulers** and choose pt/mm/in from the ruler corner or status bar. Two-finger scrolling pans the document with every tool. Pinch on the trackpad to zoom around the cursor; Command/Control-scroll also zooms. Coordinates are relative to the crop box: X increases to the right and Y increases upward in page space. Page rotation changes which PDF axis is shown by each ruler; ticks remain aligned with the displayed PDF.
 
@@ -129,3 +129,7 @@ The script sets `origin` to `https://github.com/Davud77/BotPlus-PDF-Editor.git` 
 No license has been selected yet. Add a `LICENSE` file before distributing source code publicly.
 
 PDFium component notices are included in the app and listed in [THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md).
+
+### Workspace editing details
+
+The inspector shows document properties until text, an image, a vector object or an annotation is selected. Empty clicks clear selection. Thumbnail context menus provide page copy/paste, duplicate/delete, blank insertion and rotation; navigation centers the page. The in-place editor has no field background and all PDF content and editing handles are clipped to the document viewport. The font list contains system families/faces and PDF font names. Embedded subsets without a usable Unicode program require their full installed font or another font; unsupported glyphs are rejected without replacing the original text.

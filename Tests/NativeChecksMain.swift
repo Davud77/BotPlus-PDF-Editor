@@ -38,6 +38,7 @@ struct NativeChecks {
         window.contentView = pdf
         let coordinator = PDFViewer.Coordinator(manager: manager)
         coordinator.attach(pdf); coordinator.update(pdf)
+        expect(pdf.hitTest(CGPoint(x: -1,y: 10)) == nil,"offscreen text editors never hit-test outside the viewport")
         pdf.displayBox = .cropBox; pdf.displayMode = .singlePageContinuous; pdf.scaleFactor = 1.5
         pdf.layoutDocumentView(); pdf.layoutSubtreeIfNeeded()
         let activePage = item.document.page(at: 0)!
@@ -196,6 +197,20 @@ struct NativeChecks {
         panels.setWidth(20, for: .bookmarks); expect(panels.configuration(for: .bookmarks).width == 200, "panel minimum width")
         try runPDFiumChecks(root: root)
         try runTextBlockChecks()
+        try runInlineTextChecks()
+        let originalPages = item.pageCount
+        coordinator.checkCommand(.duplicatePageAt(0),view: pdf)
+        expect(item.pageCount == originalPages+1,"thumbnail menu duplicates the requested page")
+        coordinator.checkCommand(.deletePageAt(1),view: pdf)
+        expect(item.pageCount == originalPages,"thumbnail menu deletes the requested page")
+        coordinator.checkCommand(.blankPageAt(1),view: pdf)
+        expect(item.pageCount == originalPages+1,"thumbnail menu inserts a blank page at the requested index")
+        coordinator.checkCommand(.deletePageAt(1),view: pdf)
+        pdf.scaleFactor = 0.3
+        coordinator.checkCommand(.page(0),view: pdf)
+        let centeredRect = pdf.convert(item.document.page(at: 0)!.bounds(for: .cropBox),from: item.document.page(at: 0)!)
+        expect(abs(centeredRect.midY-pdf.bounds.midY) < 2,"thumbnail navigation centers a short page vertically")
+
         // Use an isolated pasteboard, preserving the user's clipboard.
         let board = NSPasteboard.withUniqueName()
         defer { board.releaseGlobally() }
@@ -369,4 +384,78 @@ private func runTextBlockChecks() throws {
         fatalError("BLOCK CHECK FAILED: unsupported glyph must be rejected")
     } catch PDFSourceError.unsupportedGlyph { }
     print("PASS: paragraph blocks, separate columns, cross-stream text scopes, wrapping, Unicode punctuation, CAD duplicates, and unsupported glyph protection")
+}
+
+@MainActor
+private func runInlineTextChecks() throws {
+    func expect(_ condition: @autoclosure () -> Bool,_ message: String) { if !condition() { fatalError("INLINE CHECK FAILED: \(message)") } }
+    let seed = PDFDocument(), blank = PDFPage(); blank.setBounds(CGRect(x: 0,y: 0,width: 612,height: 792),for: .mediaBox); seed.insert(blank,at: 0)
+    let adding = try PDFSourceSession.adding(data: seed.dataRepresentation()!,pageIndex: 0,point: CGPoint(x: 72,y: 700),fontSize: 14,color: .black)
+    let data = try adding.applying(text: "Alpha Beta Gamma",fontSize: 14,color: .black,width: 260)
+    let previewSession = try PDFSourceSession.editing(data: data,pageIndex: 0,point: adding.resultingPoint!)
+    let suppressed = try previewSession.previewWithoutSelectedText()
+    expect(PDFDocument(data: suppressed)?.page(at: 0)?.string?.contains("Alpha") != true,"vector preview suppresses the original selected text without a field background")
+    expect(PDFDocument(data: data)?.page(at: 0)?.string?.contains("Alpha") == true,"vector preview leaves the real document unchanged")
+    let fonts = try PDFSourceSession.documentFonts(data: data)
+    expect(Set(NSFontManager.shared.availableFontFamilies).isSubset(of: Set(fonts)),"font catalog contains all system families")
+    expect(fonts.contains { $0.contains("Arial") },"font catalog includes embedded PDF font names")
+    for name in ["Helvetica","Menlo-Regular","AmericanTypewriter"] {
+        guard PDFFontCatalog.font(named: name,size: 14) != nil else { continue }
+        let source = try PDFSourceSession.adding(data: seed.dataRepresentation()!,pageIndex: 0,point: CGPoint(x: 72,y: 700),fontSize: 14,color: .black,fontName: name)
+        let changed = try source.applying(text: "System font; 123-ABC",fontSize: 14,color: .black)
+        let saved = PDFDocument(data: changed)!.dataRepresentation()!
+        expect(PDFDocument(data: saved)?.page(at: 0)?.string?.contains("System font; 123-ABC") == true,"system collection/CFF font persists searchable text: \(name)")
+    }
+    let blocks = try PDFSourceSession.blocks(data: data,pageIndex: 0)
+    expect(blocks.count == 1,"catalog shows one frame around the complete text block")
+    let session = try PDFSourceSession.editing(data: data,pageIndex: 0,point: adding.resultingPoint!)
+    let document = PDFDocument(data: data)!, page = document.page(at: 0)!
+    let pdf = PDFView(frame: CGRect(x: 0,y: 0,width: 600,height: 760))
+    let window = NSWindow(contentRect: pdf.frame,styleMask: [.titled],backing: .buffered,defer: false)
+    window.isReleasedWhenClosed = false; window.contentView = pdf
+    pdf.document = document; pdf.scaleFactor = 1; pdf.go(to: page); pdf.layoutDocumentView()
+    let model = PDFTextPropertiesModel()
+    let inline = PDFInlineTextEditor(snapshot: session.snapshot,page: page,pdfView: pdf,model: model)
+    expect(inline.isAttached && model.active,"editor and inspector are active directly on the PDF page")
+    expect(pdf.clipsToBounds && inline.editor.clipsToBounds,"PDF editor clips page, text, and overlays to the viewport")
+    expect(!inline.editor.drawsBackground,"in-place editor has no white field background")
+    expect(inline.quad().count == 4,"selected frame has a real quadrilateral")
+    let beta = (inline.editor.string as NSString).range(of: "Beta")
+    inline.editor.setSelectedRange(beta)
+    inline.apply(.size(24)); inline.apply(.color(.red)); inline.apply(.bold(true))
+    let before = inline.attributedText.attributes(at: 0,effectiveRange: nil)
+    let selected = inline.attributedText.attributes(at: beta.location,effectiveRange: nil)
+    expect((before[.font] as! NSFont).pointSize == 14,"partial formatting leaves neighboring text unchanged")
+    expect((selected[.font] as! NSFont).pointSize == 24,"partial selection receives the requested size")
+    expect(NSFontManager.shared.traits(of: selected[.font] as! NSFont).contains(.boldFontMask),"partial selection receives bold")
+    let numeric = NSTextField(frame: CGRect(x: 5,y: 5,width: 80,height: 24)); pdf.addSubview(numeric)
+    _ = window.makeFirstResponder(numeric)
+    let numberResponder = window.firstResponder
+    let textBeforeGeometry = inline.editor.string
+    inline.apply(.angle(12))
+    expect(window.firstResponder === numberResponder,"geometry input must not steal focus from its text field")
+    expect(inline.editor.string == textBeforeGeometry,"geometry controls must not replace selected document text")
+    inline.apply(.angle(0)); numeric.removeFromSuperview()
+    inline.editor.setSelectedRange(NSRange(location: 0,length: 0)); inline.apply(.width(300))
+    let originalPose = inline.geometry
+    inline.beginDrag(.move,at: CGPoint(x: 72,y: 700)); inline.drag(to: CGPoint(x: 102,y: 680)); inline.endDrag()
+    expect(abs(inline.geometry.origin.x-originalPose.origin.x-30) < 0.001,"move handle changes PDF coordinates")
+    let center = inline.geometry.point(x: inline.width/2,y: inline.ascent-inline.height/2)
+    inline.beginDrag(.rotate,at: CGPoint(x: center.x+100,y: center.y)); inline.drag(to: CGPoint(x: center.x+cos(.pi/6)*100,y: center.y+sin(.pi/6)*100)); inline.endDrag()
+    expect(abs(inline.geometry.angle-originalPose.angle - .pi/6) < 0.001,"rotation handle changes the text block angle")
+    let widthBefore = inline.width
+    let first = inline.geometry.point(x: inline.width,y: 0)
+    inline.beginDrag(.width(1),at: first); inline.drag(to: inline.geometry.point(x: inline.width+40,y: 0)); inline.endDrag()
+    expect(abs(inline.width-widthBefore-40) < 0.001,"side handle stretches the field without changing font size")
+    expect((inline.attributedText.attribute(.font,at: 0,effectiveRange: nil) as! NSFont).pointSize == 14,"field stretching preserves font size")
+    let edited = try session.applying(text: inline.attributedText.string,fontSize: 14,color: .black,width: inline.width,richText: inline.attributedText,geometry: inline.geometry)
+    let reload = try PDFSourceSession.editing(data: edited,pageIndex: 0,point: session.resultingPoint!)
+    expect(reload.snapshot.text == "Alpha Beta Gamma","inline edits preserve complete searchable text")
+    expect(abs(reload.snapshot.geometry.angle - .pi/6) < 0.001,"rotation persists in the original PDF content")
+    let reloadedBeta = (reload.snapshot.attributedText.string as NSString).range(of: "Beta")
+    let reloadedFont = reload.snapshot.attributedText.attribute(.font,at: reloadedBeta.location,effectiveRange: nil) as! NSFont
+    expect(abs(reloadedFont.pointSize-24) < 0.01,"partial font size persists after saving")
+    inline.cancel(); expect(!inline.isAttached && !model.active,"cancel removes the in-place editor and its temporary mask")
+    window.close()
+    print("PASS: inline text editor, block catalog, partial formatting, move, rotation, field stretching, source save, and cleanup")
 }

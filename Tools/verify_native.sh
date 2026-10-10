@@ -15,6 +15,7 @@ trap cleanup EXIT
 }
 sed '/^@main$/d' "$PROJECT_ROOT/ContentView.swift" > "$CHECK_DIRECTORY/NativeChecks.swift"
 cat "$PROJECT_ROOT/PDFiumSourceEditor.swift" >> "$CHECK_DIRECTORY/NativeChecks.swift"
+cat "$PROJECT_ROOT/PDFTextEditingUI.swift" >> "$CHECK_DIRECTORY/NativeChecks.swift"
 cat "$PROJECT_ROOT/Tests/NativeChecksMain.swift" >> "$CHECK_DIRECTORY/NativeChecks.swift"
 mkdir -p "$CHECK_DIRECTORY/Modules" "$CHECK_DIRECTORY/ClangModules"
 clang -target arm64-apple-macos14.0 -I "$PROJECT_ROOT/Vendor/PDFium/include" -I "$PROJECT_ROOT/Native/PDFiumBridge/include" -c "$PROJECT_ROOT/Native/PDFiumBridge/PDFiumSave.c" -o "$CHECK_DIRECTORY/PDFiumSave.o"
