@@ -3419,7 +3419,18 @@ private extension PDFViewer.Coordinator {
     func exportBookmarks(html: Bool,item: PDFDocumentItem) {
         let rows = makeBookmarkRows(root: manager.bookmarkRoot()!,document: item.document)
         func escape(_ text: String) -> String { text.replacingOccurrences(of: "&",with: "&amp;").replacingOccurrences(of: "<",with: "&lt;").replacingOccurrences(of: "\"",with: "&quot;") }
-        let content = html ? "<!doctype html><html lang=\"\(manager.language == .ru ? "ru" : "en")\"><meta charset=\"utf-8\"><title>Bookmarks</title><body><h1>\(escape(item.filename))</h1><ul>"+rows.map { "<li>\(escape($0.title)) — \($0.pageIndex+1)</li>" }.joined()+"</ul></body></html>" : rows.map { "\($0.pageIndex+1)\t"+String(repeating: "  ",count: $0.depth)+$0.title }.joined(separator: "\n")
+        let content: String
+        if html {
+            let lang = manager.language == .ru ? "ru" : "en"
+            var result = "<!doctype html><html lang=\""+lang+"\"><meta charset=\"utf-8\"><title>Bookmarks</title><body><h1>"
+            result += escape(item.filename)+"</h1><ul>"
+            for row in rows { result += "<li>"+escape(row.title)+" — "+String(row.pageIndex+1)+"</li>" }
+            result += "</ul></body></html>"; content = result
+        } else {
+            var lines: [String] = []
+            for row in rows { let indent = String(repeating: "  ",count: row.depth); lines.append(String(row.pageIndex+1)+"\t"+indent+row.title) }
+            content = lines.joined(separator: "\n")
+        }
         PDFDialogs.save("Bookmarks."+(html ? "html" : "txt"),type: html ? .html : .plainText) { [weak self] url in
             do { try content.write(to: url,atomically: true,encoding: .utf8) } catch { self?.manager.say("Export failed","Ошибка экспорта") }
         }
