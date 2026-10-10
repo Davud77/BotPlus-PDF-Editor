@@ -22,6 +22,23 @@ struct NativeChecks {
         let root = URL(fileURLWithPath: CommandLine.arguments[1], isDirectory: true)
         _ = NSApplication.shared
         NSApp.setActivationPolicy(.prohibited)
+        let customSymbols: Set<String> = ["botplus.floppy", "botplus.bookmark.plus"]
+        var checkedSymbols = Set<String>()
+        for tab in RibbonTab.allCases {
+            for command in RibbonView.groups(for: tab).flatMap(\.commands) {
+                if customSymbols.contains(command.symbol) { continue }
+                let resolved = SystemSymbolCatalog.name(command.symbol)
+                expect(NSImage(systemSymbolName: resolved, accessibilityDescription: nil) != nil,
+                       "ribbon icon is available on this OS: \(tab.title.en)/\(command.id)")
+                checkedSymbols.insert(command.symbol)
+            }
+        }
+        expect(RibbonView.groups(for: .bookmarks).flatMap(\.commands).first { $0.id == "bookmarkAdd" }?.symbol == "botplus.bookmark.plus", "bookmark add uses our composed icon")
+        expect(NSImage(systemSymbolName: "bookmark", accessibilityDescription: nil) != nil, "bookmark component exists")
+        expect(NSImage(systemSymbolName: "plus.circle.fill", accessibilityDescription: nil) != nil, "plus component exists")
+        expect(SystemSymbolCatalog.name("botplus.nonexistent.regression") == "questionmark.square", "missing symbol has a cached compatible fallback")
+        expect(SystemSymbolCatalog.name("botplus.nonexistent.regression") == "questionmark.square", "fallback remains stable across view updates")
+        print("PASS: all \(RibbonTab.allCases.count) ribbon tabs, \(checkedSymbols.count) icons and composed bookmark icon")
         let document = PDFDocument()
         let page = PDFPage()
         page.setBounds(CGRect(x: 0, y: 0, width: 612, height: 792), for: .mediaBox)

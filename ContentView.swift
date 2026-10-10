@@ -7,7 +7,7 @@ import UniformTypeIdentifiers
 
 private enum BotPlusBrand {
     static let name = "BotPlus PDF Editor"
-    static let version = "1.1.1"
+    static let version = "1.1.2"
     static let copyright = "© 2026 BotPlus"
     static let supportURL = URL(string: "https://github.com/Davud77/BotPlus-PDF-Editor")!
     static let telegramURL = URL(string: "https://t.me/botplus_pdf")!
@@ -934,7 +934,7 @@ private struct QuickBar: View {
                 QuickIcon("Forward", "Вперёд", "chevron.right", language: manager.language) { manager.perform(.next) }
                 Spacer(minLength: 8)
                 HStack(spacing: 6) {
-                    Image(systemName: "magnifyingglass").foregroundStyle(Palette.muted)
+                    SystemSymbolImage(name: "magnifyingglass").foregroundStyle(Palette.muted)
                     TextField(manager.language == .ru ? "Поиск / Быстрый поиск…" : "Search / Quick Search…", text: $manager.searchText, onCommit: { manager.send(.refresh) })
                         .textFieldStyle(.plain).frame(width: 158)
                 }.padding(.horizontal, 8).frame(height: 25).background(Palette.raised, in: RoundedRectangle(cornerRadius: 4)).padding(.trailing, 10)
@@ -959,10 +959,40 @@ private struct QuickIcon: View {
         Button(action: action) {
             Group {
                 if symbol == "botplus.floppy" { FloppyDiskSymbol().stroke(style: StrokeStyle(lineWidth: 1.3, lineJoin: .round)).frame(width: 14, height: 14) }
-                else { Image(systemName: symbol).font(.system(size: 12)) }
+                else { SystemSymbolImage(name: symbol).font(.system(size: 12)) }
             }.frame(width: 24, height: 24)
         }
             .buttonStyle(.plain).foregroundStyle(Palette.text).help(language == .ru ? ru : en)
+    }
+}
+
+// Resolve once per symbol on this OS before SwiftUI renders it. This avoids
+// blank icons and repeated SwiftUI warnings on older supported macOS versions.
+@MainActor
+private enum SystemSymbolCatalog {
+    private static var resolved: [String: String] = [:]
+    static func name(_ requested: String) -> String {
+        if let cached = resolved[requested] { return cached }
+        let available = NSImage(systemSymbolName: requested, accessibilityDescription: nil) != nil
+        let result = available ? requested : "questionmark.square"
+        resolved[requested] = result
+        return result
+    }
+}
+
+private struct SystemSymbolImage: View {
+    let name: String
+    var body: some View { Image(systemName: SystemSymbolCatalog.name(name)) }
+}
+
+private struct BookmarkAddSymbol: View {
+    var body: some View {
+        ZStack(alignment: .bottomTrailing) {
+            Image(systemName: SystemSymbolCatalog.name("bookmark")).resizable().scaledToFit().frame(width: 15, height: 21)
+                .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
+            Image(systemName: SystemSymbolCatalog.name("plus.circle.fill")).resizable().scaledToFit().frame(width: 11, height: 11)
+                .background(Palette.ribbon, in: Circle())
+        }.accessibilityHidden(true)
     }
 }
 
@@ -998,7 +1028,7 @@ private struct RibbonView: View {
             Palette.separator.frame(height: 1)
             ScrollView(.horizontal, showsIndicators: false) {
                 HStack(spacing: 0) {
-                    ForEach(groups(for: manager.tab), id: \.id) { group in RibbonGroupView(group: group, manager: manager) }
+                    ForEach(Self.groups(for: manager.tab), id: \.id) { group in RibbonGroupView(group: group, manager: manager) }
                 }.padding(.horizontal, 6)
             }.frame(height: 91)
             Palette.separator.frame(height: 1)
@@ -1011,7 +1041,7 @@ private struct RibbonView: View {
         return max(50, ceil(width) + (tab == .file ? 28 : 20))
     }
 
-    private func groups(for tab: RibbonTab) -> [RibbonGroupSpec] {
+    fileprivate static func groups(for tab: RibbonTab) -> [RibbonGroupSpec] {
                 let tool = { (id: String, en: String, ru: String, icon: String, value: PDFTool) in RibbonCommand(id, en, ru, icon, .tool(value)) }
         let cmd = { (id: String, en: String, ru: String, icon: String) in RibbonCommand(id, en, ru, icon, .feature(id)) }
         switch tab {
@@ -1085,7 +1115,7 @@ private struct RibbonView: View {
                     RibbonGroupSpec("order", "Reading Order", "Порядок чтения", [cmd("order", "Reading Order", "Порядок чтения", "list.number")]),
                     RibbonGroupSpec("alt", "Alternative Text", "Альтернативный текст", [cmd("alt", "Alt Text", "Описание изображения", "text.quote")])]
         case .bookmarks:
-            return [RibbonGroupSpec("create", "Create", "Создать", [cmd("bookmarkAdd", "Add Bookmark", "Добавить закладку", "bookmark.badge.plus"), cmd("bookmarkDelete", "Delete Bookmark", "Удалить закладку", "bookmark.slash"), cmd("bookmarkFromPageText", "From Page Text", "Из текста на странице", "text.viewfinder"), cmd("bookmarkEveryN", "Every N-th Page", "Закладка для каждой N-й стр.", "book.pages"), cmd("bookmarkFromTOC", "From TOC", "Из Содержания", "list.bullet.rectangle"), cmd("bookmarkFromFile", "From Text File", "Из текстового файла", "doc.text")]),
+            return [RibbonGroupSpec("create", "Create", "Создать", [cmd("bookmarkAdd", "Add Bookmark", "Добавить закладку", "botplus.bookmark.plus"), cmd("bookmarkDelete", "Delete Bookmark", "Удалить закладку", "bookmark.slash"), cmd("bookmarkFromPageText", "From Page Text", "Из текста на странице", "text.viewfinder"), cmd("bookmarkEveryN", "Every N-th Page", "Закладка для каждой N-й стр.", "book.pages"), cmd("bookmarkFromTOC", "From TOC", "Из Содержания", "list.bullet.rectangle"), cmd("bookmarkFromFile", "From Text File", "Из текстового файла", "doc.text")]),
                     RibbonGroupSpec("modify", "Modify", "Изменить", [cmd("bookmarkAddText", "Add Text", "Добавить текст", "text.badge.plus"), cmd("bookmarkCase", "Change Case", "Изменить регистр", "textformat"), cmd("bookmarkZoom", "Change Zoom", "Изменить масштаб", "magnifyingglass"), cmd("bookmarkDestination", "Named Destination to Link", "Имен. назначение в ссылку", "link"), cmd("bookmarkFind", "Find & Replace", "Найти и заменить", "text.magnifyingglass"), cmd("bookmarkActions", "Delete Actions", "Удалить действия", "trash"), cmd("bookmarkSort", "Sort", "Сортировать", "arrow.up.arrow.down"), cmd("bookmarkValidate", "Validate", "Утвердить", "checkmark.seal"), cmd("bookmarkMerge", "Merge Duplicates", "Объединить дубликаты", "arrow.triangle.merge")]),
                     RibbonGroupSpec("convert", "Convert", "Преобразовать", [cmd("bookmarkTOC", "Create Table of Contents", "Создать Содержание", "list.bullet.indent"), cmd("bookmarkLinks", "Link for Bookmarks", "Ссылка для закладок", "link.badge.plus"), cmd("bookmarkSortPages", "Sort Pages", "Сортировка страниц", "doc.text.magnifyingglass"), cmd("bookmarkNamed", "Convert to Named Destinations", "Преобр. в им. назначения", "bookmark.fill"), cmd("bookmarkHTML", "Export to HTML", "Экспорт в HTML", "chevron.left.forwardslash.chevron.right"), cmd("bookmarkText", "Export to Text File", "Экспортировать в текстовый файл", "doc.text")])]
         case .help:
@@ -1095,7 +1125,7 @@ private struct RibbonView: View {
         }
     }
 
-    private func layoutCommands() -> [RibbonCommand] {
+    private static func layoutCommands() -> [RibbonCommand] {
         PageLayout.allCases.map { layout in
             RibbonCommand("layout-\(layout.id)", layout.title.en, layout.title.ru, layout == .spread ? "book.pages" : (layout == .single ? "doc" : "scroll"), .layout(layout))
         }
@@ -1138,7 +1168,8 @@ private func commandLabel(_ command: RibbonCommand, manager: DocumentManager) ->
     return VStack(spacing: 5) {
         Group {
             if command.symbol == "botplus.floppy" { FloppyDiskSymbol().stroke(style: StrokeStyle(lineWidth: 1.7, lineJoin: .round)).frame(width: 22, height: 22) }
-            else { Image(systemName: command.symbol).font(.system(size: 20, weight: .regular)) }
+            else if command.symbol == "botplus.bookmark.plus" { BookmarkAddSymbol().frame(width: 22, height: 22) }
+            else { SystemSymbolImage(name: command.symbol).font(.system(size: 20, weight: .regular)) }
         }.frame(height: 24)
         Text(manager.text(command.title)).font(.system(size: 9)).lineLimit(2).multilineTextAlignment(.center).minimumScaleFactor(0.75).frame(height: 23)
     }
@@ -1206,16 +1237,16 @@ private struct DocumentTabs: View {
                 HStack(spacing: 0) {
                     Button { manager.select(item.id) } label: {
                         HStack(spacing: 7) {
-                            Image(systemName: "doc.text").foregroundStyle(manager.selectedID == item.id ? Palette.accent : Palette.muted)
+                            SystemSymbolImage(name: "doc.text").foregroundStyle(manager.selectedID == item.id ? Palette.accent : Palette.muted)
                             Text(item.filename).lineLimit(1)
                         }.font(.system(size: 11)).padding(.horizontal, 11).frame(height: 32).frame(maxWidth: 230)
                             .background(manager.selectedID == item.id ? Palette.selected : .clear)
                     }.buttonStyle(.plain).help(item.filename)
-                    Button { manager.close(item.id) } label: { Image(systemName: "xmark").font(.system(size: 9, weight: .semibold)).frame(width: 24, height: 28) }
+                    Button { manager.close(item.id) } label: { SystemSymbolImage(name: "xmark").font(.system(size: 9, weight: .semibold)).frame(width: 24, height: 28) }
                         .buttonStyle(.plain).help(manager.language == .ru ? "Закрыть документ" : "Close document")
                 }.overlay(alignment: .trailing) { Palette.separator.frame(width: 1, height: 18) }
             }
-            Button { manager.openPanel() } label: { Image(systemName: "plus").font(.system(size: 11, weight: .semibold)).frame(width: 35, height: 32) }
+            Button { manager.openPanel() } label: { SystemSymbolImage(name: "plus").font(.system(size: 11, weight: .semibold)).frame(width: 35, height: 32) }
                 .buttonStyle(.plain).help(manager.language == .ru ? "Открыть PDF" : "Open PDF")
             Spacer()
         }
@@ -1228,7 +1259,7 @@ private struct EmptyWorkspace: View {
     @ObservedObject var manager: DocumentManager
     var body: some View {
         VStack(spacing: 13) {
-            Image(systemName: "doc.text.viewfinder").font(.system(size: 44, weight: .ultraLight)).foregroundStyle(Palette.muted)
+            SystemSymbolImage(name: "doc.text.viewfinder").font(.system(size: 44, weight: .ultraLight)).foregroundStyle(Palette.muted)
             Text(manager.language == .ru ? "Документ не открыт" : "No document open").font(.system(size: 17, weight: .medium))
             Text(manager.language == .ru ? "Дважды щёлкните здесь или перетащите PDF-файл" : "Double-click here or drop a PDF file to open")
                 .font(.system(size: 12)).foregroundStyle(Palette.muted)
@@ -1287,7 +1318,7 @@ private struct PanelIconStrip: View {
             }) { panel in
                 let config = panels.configuration(for: panel)
                 Button { panels.toggleDrawer(panel) } label: {
-                    Image(systemName: panel.symbol).font(.system(size: 14))
+                    SystemSymbolImage(name: panel.symbol).font(.system(size: 14))
                         .foregroundStyle(config.isVisible && config.isExpanded ? Palette.accent : Palette.muted)
                         .frame(width: 29, height: 32)
                         .background(config.isVisible && config.isExpanded ? Palette.selected : .clear, in: RoundedRectangle(cornerRadius: 3))
@@ -1366,16 +1397,16 @@ private struct PanelHeader: View {
             Text(manager.text(panel.title)).font(.system(size: 11, weight: .semibold)).lineLimit(1)
             Spacer(minLength: 0)
             Button { manager.panels.setDock(config.dock == .floating ? config.lastDock : .floating, for: panel) } label: {
-                Image(systemName: config.dock == .floating ? "rectangle.inset.filled" : "macwindow").frame(width: 20, height: 23)
+                SystemSymbolImage(name: config.dock == .floating ? "rectangle.inset.filled" : "macwindow").frame(width: 20, height: 23)
             }.buttonStyle(.plain).help(manager.language == .ru ? "Отсоединить / закрепить" : "Detach / Re-dock")
             Button { manager.panels.setDock(.left, for: panel) } label: {
-                Image(systemName: "arrow.left").frame(width: 20, height: 23)
+                SystemSymbolImage(name: "arrow.left").frame(width: 20, height: 23)
             }.buttonStyle(.plain).disabled(config.dock == .left).help(manager.language == .ru ? "Переместить влево" : "Dock Left")
             Button { manager.panels.setDock(.right, for: panel) } label: {
-                Image(systemName: "arrow.right").frame(width: 20, height: 23)
+                SystemSymbolImage(name: "arrow.right").frame(width: 20, height: 23)
             }.buttonStyle(.plain).disabled(config.dock == .right).help(manager.language == .ru ? "Переместить вправо" : "Dock Right")
             Button { manager.panels.setVisible(false, for: panel) } label: {
-                Image(systemName: "xmark").frame(width: 20, height: 23)
+                SystemSymbolImage(name: "xmark").frame(width: 20, height: 23)
             }.buttonStyle(.plain).help(manager.language == .ru ? "Закрыть панель" : "Close panel")
         }.font(.system(size: 10)).padding(.horizontal, 6).frame(height: 30).background(Palette.raised)
     }
@@ -1403,9 +1434,9 @@ private struct PanelBody: View {
                 let document = item.document
                 VStack(spacing: 4) {
                     HStack {
-                        Image(systemName: "minus.magnifyingglass")
+                        SystemSymbolImage(name: "minus.magnifyingglass")
                         Slider(value: $manager.thumbnailZoom,in: 0...1)
-                        Image(systemName: "plus.magnifyingglass")
+                        SystemSymbolImage(name: "plus.magnifyingglass")
                     }.padding(.horizontal,10).help(manager.language == .ru ? "Размер миниатюр" : "Thumbnail size")
                     GeometryReader { geometry in
                         let available = max(44,geometry.size.width-16)
@@ -1509,7 +1540,7 @@ private struct PanelBody: View {
         }
     }
     private func empty(_ message: String, symbol: String) -> some View {
-        VStack(spacing: 8) { Image(systemName: symbol).font(.title3).foregroundStyle(Palette.muted); Text(message).font(.system(size: 10)).foregroundStyle(Palette.muted).multilineTextAlignment(.center) }
+        VStack(spacing: 8) { SystemSymbolImage(name: symbol).font(.title3).foregroundStyle(Palette.muted); Text(message).font(.system(size: 10)).foregroundStyle(Palette.muted).multilineTextAlignment(.center) }
             .frame(maxWidth: .infinity, maxHeight: .infinity).padding(14)
     }
 }
@@ -1666,15 +1697,15 @@ private struct StatusBar: View {
                     .font(.system(size: 9, design: .monospaced)).foregroundStyle(Palette.muted)
             }
             Picker("Units", selection: $manager.rulerUnit) { ForEach(RulerUnit.allCases) { unit in Text(unit.rawValue).tag(unit) } }.labelsHidden().frame(width: 62)
-            Image(systemName: "minus.magnifyingglass").font(.system(size: 10))
+            SystemSymbolImage(name: "minus.magnifyingglass").font(.system(size: 10))
             Slider(value: Binding(get: { Double(manager.selected?.zoom ?? 1) }, set: { manager.send(.setZoom(CGFloat($0))) }), in: 0.25...4)
                 .frame(width: 120).disabled(manager.selected == nil)
-            Image(systemName: "plus.magnifyingglass").font(.system(size: 10))
+            SystemSymbolImage(name: "plus.magnifyingglass").font(.system(size: 10))
             Text(String(format: "%.0f%%", Double(manager.selected?.zoom ?? 1) * 100)).font(.system(size: 10, design: .monospaced)).frame(width: 42, alignment: .trailing)
             Hairline(height: 17)
             ForEach(PageLayout.allCases) { layout in
                 Button { manager.layout = layout; manager.send(.refresh) } label: {
-                    Image(systemName: layout == .continuous ? "scroll" : (layout == .single ? "doc" : "book.pages"))
+                    SystemSymbolImage(name: layout == .continuous ? "scroll" : (layout == .single ? "doc" : "book.pages"))
                         .font(.system(size: 11)).foregroundStyle(manager.layout == layout ? Palette.accent : Palette.muted).frame(width: 22, height: 22)
                 }.buttonStyle(.plain).help(manager.text(layout.title))
             }
@@ -1689,7 +1720,7 @@ private struct StatusIcon: View {
     let symbol: String
     let action: RibbonAction
     var body: some View {
-        Button { manager.perform(action) } label: { Image(systemName: symbol).font(.system(size: 11)).frame(width: 23, height: 23) }
+        Button { manager.perform(action) } label: { SystemSymbolImage(name: symbol).font(.system(size: 11)).frame(width: 23, height: 23) }
             .buttonStyle(.plain).disabled(manager.selected == nil).help(manager.text(title))
     }
 }

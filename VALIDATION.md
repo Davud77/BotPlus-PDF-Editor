@@ -28,3 +28,7 @@ Hover zoom routes by screen-pointer location rather than the first responder. Na
 Version 1.1.1 runtime regressions exercise 1,104 repeated ruler formatting passes, integer/fractional/negative/zero labels in RU/EN, and actual SwiftUI Canvas rendering. Embedded-text reading uses a read-only PDFium document and is tested on blank pages and searchable text. Native window/panel updates and popover completion are deferred; the animation and automatic text completion/Writing Tools are disabled in the native PDF text editors. These checks do not assert that OS-owned linkd/TextRecognition services are healthy.
 
 The macos-15-intel VM aborts inside Apple MTLLoader during offscreen ImageRenderer work (`Target device architecture is nil`). Only this offscreen SwiftUI image check is skipped on Intel CI; it remains enabled on physical/local machines and Apple Silicon CI. All label-formatting, native PDF geometry, text editing and persistence checks run on Intel.
+
+## Значки интерфейса 1.1.2
+
+Нативная проверка перебирает команды всех 13 вкладок ленты. Проверяются системные компоненты составного значка «Добавить закладку», доступность разрешённых имён и стабильность кэшированного заменителя для отсутствующего значка. Эти проверки выполняются также на Intel CI. Аудит текущего SDK выявил единственное отсутствующее имя среди 133 проверенных — `bookmark.badge.plus`, теперь удалённое из интерфейса.
