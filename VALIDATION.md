@@ -23,4 +23,4 @@ Expanded ribbon regressions cover configured markup opacity and line grouping; a
 
 Version 1.1 adds tests for pinch zoom direction/clamping, raster reuse across nearby sizes, and invalidation after document changes. Thumbnail gesture events are coalesced and confined to the panel bounds.
 
-Hover zoom routes by screen-pointer location rather than the first responder. Native checks cover accumulated PDF and thumbnail gesture deltas without changing focus. The thumbnail cache reuses one 1024-pixel raster across the full zoom range; changing thumbnail size does not rerender the same CAD page. PDF zoom performs one document layout per coalesced batch.
+Hover zoom routes by screen-pointer location rather than the first responder. Native checks cover accumulated PDF and thumbnail gesture deltas without changing focus. During a gesture the thumbnail cache scales the existing page raster; detail upgrades after 180 ms without new events. Small thumbnails use proportionately smaller rasters to avoid cache eviction while showing a dense grid. PDF zoom performs one document layout per coalesced batch.

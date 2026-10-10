@@ -391,6 +391,7 @@ private final class DocumentManager: ObservableObject {
         didSet { UserDefaults.standard.set(theme.rawValue, forKey: "BotPlusPDFEditor.theme") }
     }
     @Published var thumbnailZoom = 0.55
+    @Published var thumbnailGestureActive = false
     var contentRevision = 0
     @Published var selectedOutline: PDFOutline?
     @Published var stampText = "СОГЛАСОВАНО"
@@ -1400,7 +1401,7 @@ private struct PanelBody: View {
                                         let ratio = rotated ? box.width/max(1,box.height) : box.height/max(1,box.width)
                                         Button { manager.navigate(to: index) } label: {
                                             VStack(spacing: 4) {
-                                                Image(nsImage: PDFThumbnailCache.shared.image(page: page,documentID: item.id,index: index,revision: manager.contentRevision,width: cell,ratio: ratio))
+                                                Image(nsImage: PDFThumbnailCache.shared.image(page: page,documentID: item.id,index: index,revision: manager.contentRevision,width: cell,ratio: ratio,interactive: manager.thumbnailGestureActive))
                                                     .resizable().aspectRatio(contentMode: .fit).frame(width: cell,height: cell*ratio)
                                                     .background(.white)
                                                     .overlay(Rectangle().stroke(manager.selected?.pageIndex == index ? Palette.accent : Palette.separator,lineWidth: 2))
@@ -3818,6 +3819,7 @@ private final class ThumbnailGestureView: NSView {
     private var monitor: Any?
     private var pendingValue: Double?
     private var scheduled = false
+    private var detailWork: DispatchWorkItem?
     override func hitTest(_ point: NSPoint) -> NSView? { nil }
     override func viewDidMoveToWindow() {
         super.viewDidMoveToWindow(); stop(); guard window != nil else { return }
@@ -3835,6 +3837,10 @@ private final class ThumbnailGestureView: NSView {
     }
     func adjust(_ delta: Double) {
         guard delta.isFinite,let manager else { return }
+        if !manager.thumbnailGestureActive { manager.thumbnailGestureActive = true }
+        detailWork?.cancel()
+        let work = DispatchWorkItem { [weak manager] in manager?.thumbnailGestureActive = false }
+        detailWork = work; DispatchQueue.main.asyncAfter(deadline: .now()+0.18,execute: work)
         pendingValue = Self.zoom((pendingValue ?? manager.thumbnailZoom),delta: delta)
         guard !scheduled else { return }; scheduled = true
         DispatchQueue.main.async { [weak self] in self?.flush() }
@@ -3844,21 +3850,25 @@ private final class ThumbnailGestureView: NSView {
         if let value = pendingValue { pendingValue = nil; manager?.thumbnailZoom = value }
     }
     static func zoom(_ value: Double,delta: Double) -> Double { min(1,max(0,value+delta*0.75)) }
-    func stop() { if let monitor { NSEvent.removeMonitor(monitor) }; monitor = nil; pendingValue = nil }
+    func stop() { if let monitor { NSEvent.removeMonitor(monitor) }; monitor = nil; pendingValue = nil; detailWork = nil }
 }
 
 @MainActor
 private final class PDFThumbnailCache {
     static let shared = PDFThumbnailCache()
-    private let cache = NSCache<NSString,NSImage>()
+    private final class Raster {
+        let image: NSImage; let resolution: Int
+        init(_ image: NSImage,resolution: Int) { self.image = image; self.resolution = resolution }
+    }
+    private let cache = NSCache<NSString,Raster>()
     private(set) var renderCount = 0
     init() { cache.totalCostLimit = 48*1024*1024; cache.countLimit = 240 }
-    func image(page: PDFPage,documentID: UUID,index: Int,revision: Int,width: CGFloat,ratio: CGFloat) -> NSImage {
-        // Keep one detailed raster per page. Resizing the grid scales this image
-        // without rerendering complex CAD paths on every gesture event.
-        let bucket = 1024
-        let key = "\(documentID.uuidString)|\(index)|\(revision)|\(bucket)" as NSString
-        if let image = cache.object(forKey: key) { return image }
+    func image(page: PDFPage,documentID: UUID,index: Int,revision: Int,width: CGFloat,ratio: CGFloat,interactive: Bool = false) -> NSImage {
+        let bucket = min(1280,max(128,Int(ceil(width*2/128))*128))
+        let key = "\(documentID.uuidString)|\(index)|\(revision)" as NSString
+        // During a gesture, immediately scale the current raster. Upgrade its
+        // detail after the gesture settles, without storing every zoom size.
+        if let raster = cache.object(forKey: key),interactive || raster.resolution >= bucket { return raster.image }
         let height = max(1,CGFloat(bucket)*max(0.1,min(12,ratio)))
         let factor = min(1,4096/max(CGFloat(bucket),height))
         let w = max(1,Int(CGFloat(bucket)*factor)),h = max(1,Int(height*factor))
@@ -3871,7 +3881,7 @@ private final class PDFThumbnailCache {
         NSGraphicsContext.restoreGraphicsState()
         guard let bitmap = context.makeImage() else { return NSImage(size: rect.size) }
         let image = NSImage(cgImage: bitmap,size: CGSize(width: width,height: width*ratio))
-        cache.setObject(image,forKey: key,cost: w*h*4); renderCount += 1; return image
+        cache.setObject(Raster(image,resolution: bucket),forKey: key,cost: w*h*4); renderCount += 1; return image
     }
 }
 
