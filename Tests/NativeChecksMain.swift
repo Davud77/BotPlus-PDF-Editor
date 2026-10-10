@@ -3,6 +3,7 @@
 extension PDFViewerView {
     fileprivate func checkMagnify(_ delta: CGFloat, anchor: CGPoint) { applyMagnification(delta, at: anchor) }
     fileprivate func checkQueuedMagnify(_ delta: CGFloat, anchor: CGPoint) { queueMagnification(delta,at: anchor) }
+    fileprivate func checkFlushMagnify() { flushMagnification() }
     fileprivate func checkDraw(page: PDFPage, start: CGPoint, end: CGPoint, tool: PDFTool) {
         commitDrawing(Preview(page: page, start: start, end: end, tool: tool))
     }
@@ -101,7 +102,7 @@ struct NativeChecks {
         let responderBefore = window.firstResponder
         let queuedZoom = pdf.scaleFactor
         pdf.checkQueuedMagnify(0.04,anchor: anchor); pdf.checkQueuedMagnify(0.06,anchor: anchor)
-        RunLoop.main.run(until: Date().addingTimeInterval(0.02))
+        pdf.checkFlushMagnify()
         expect(abs(pdf.scaleFactor - queuedZoom*exp(0.10)) < 0.001,"queued zoom preserves accumulated gesture deltas")
         expect(window.firstResponder === responderBefore,"gesture zoom does not require a click or change focus")
         pdf.checkMagnify(-0.10,anchor: anchor)
@@ -528,7 +529,7 @@ private func runRibbonFeatureChecks(root: URL) throws {
     let gesture = ThumbnailGestureView(frame: .zero); gesture.manager = manager
     manager.thumbnailZoom = 0.5
     gesture.adjust(0.1); gesture.adjust(0.1)
-    withExtendedLifetime(gesture) { RunLoop.main.run(until: Date().addingTimeInterval(0.05)) }
+    gesture.flush()
     expect(abs(manager.thumbnailZoom-0.65) < 0.00001,"thumbnail gesture deltas coalesce without a focused thumbnail")
     let cache = PDFThumbnailCache(),key = UUID()
     let one = cache.image(page: page,documentID: key,index: 0,revision: 1,width: 100,ratio: 792/612)

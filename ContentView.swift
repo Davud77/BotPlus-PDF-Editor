@@ -3079,11 +3079,12 @@ private final class PDFViewerView: PDFView {
         guard delta.isFinite,delta != 0 else { return }
         pendingZoom += delta; zoomAnchor = point
         guard !zoomScheduled else { return }; zoomScheduled = true
-        DispatchQueue.main.async { [weak self] in
-            guard let self else { return }; self.zoomScheduled = false
-            let delta = self.pendingZoom,point = self.zoomAnchor; self.pendingZoom = 0; self.zoomAnchor = nil
-            if let point { self.applyMagnification(delta,at: point) }
-        }
+        DispatchQueue.main.async { [weak self] in self?.flushMagnification() }
+    }
+    private func flushMagnification() {
+        zoomScheduled = false
+        let delta = pendingZoom,point = zoomAnchor; pendingZoom = 0; zoomAnchor = nil
+        if let point { applyMagnification(delta,at: point) }
     }
     private func applyMagnification(_ delta: CGFloat, at anchor: CGPoint) {
         requestedScrollOrigin = nil; lastScrollOrigin = nil
@@ -3836,10 +3837,11 @@ private final class ThumbnailGestureView: NSView {
         guard delta.isFinite,let manager else { return }
         pendingValue = Self.zoom((pendingValue ?? manager.thumbnailZoom),delta: delta)
         guard !scheduled else { return }; scheduled = true
-        DispatchQueue.main.async { [weak self] in
-            guard let self else { return }; self.scheduled = false
-            if let value = self.pendingValue { self.pendingValue = nil; self.manager?.thumbnailZoom = value }
-        }
+        DispatchQueue.main.async { [weak self] in self?.flush() }
+    }
+    func flush() {
+        scheduled = false
+        if let value = pendingValue { pendingValue = nil; manager?.thumbnailZoom = value }
     }
     static func zoom(_ value: Double,delta: Double) -> Double { min(1,max(0,value+delta*0.75)) }
     func stop() { if let monitor { NSEvent.removeMonitor(monitor) }; monitor = nil; pendingValue = nil }
