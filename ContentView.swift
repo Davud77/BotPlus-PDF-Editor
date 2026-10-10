@@ -2729,9 +2729,13 @@ private final class PDFViewerView: PDFView {
     private var requestedScrollOrigin: CGPoint?
     private var lastScrollOrigin: CGPoint?
     private var eventMonitor: Any?
+    private var pendingZoom: CGFloat = 0
+    private var zoomAnchor: CGPoint?
+    private var zoomScheduled = false
     private var tracking: NSTrackingArea?
     private let overlay = AnnotationOverlayView(frame: .zero)
     override var acceptsFirstResponder: Bool { true }
+    override func acceptsFirstMouse(for event: NSEvent?) -> Bool { true }
     override init(frame: NSRect) { super.init(frame: frame); clipsToBounds = true }
     required init?(coder: NSCoder) { super.init(coder: coder); clipsToBounds = true }
 
@@ -2755,17 +2759,16 @@ private final class PDFViewerView: PDFView {
         eventMonitor = NSEvent.addLocalMonitorForEvents(matching: [.magnify, .scrollWheel, .leftMouseUp]) { [weak self] event in
             var handled = false
             MainActor.assumeIsolated {
-                if let self, event.window === self.window {
-                    let local = self.convert(event.locationInWindow, from: nil)
-                    if self.bounds.contains(local) {
+                if let self,let local = HoverEventLocation.point(for: event,in: self) {
+                    if self.visibleRect.contains(local) {
                         if event.type == .leftMouseUp {
                             if [.highlight,.underline,.strike].contains(self.activeTool) {
                                 DispatchQueue.main.async { [weak self] in self?.onMarkupFinished?() }
                             }
                         } else if event.type == .magnify {
-                            self.applyMagnification(event.magnification, at: local); handled = true
+                            self.queueMagnification(event.magnification,at: local); handled = true
                         } else if event.modifierFlags.contains(.command) || event.modifierFlags.contains(.control) {
-                            self.applyMagnification(-event.scrollingDeltaY * 0.01, at: local); handled = true
+                            self.queueMagnification(-event.scrollingDeltaY * (event.hasPreciseScrollingDeltas ? 0.01 : 0.08),at: local); handled = true
                         } else {
                             self.applyScroll(event); handled = true
                         }
@@ -2776,12 +2779,13 @@ private final class PDFViewerView: PDFView {
         }
     }
     func stopEventMonitoring() {
+        pendingZoom = 0; zoomAnchor = nil
         if let eventMonitor { NSEvent.removeMonitor(eventMonitor) }; eventMonitor = nil
         if cursorPushed { NSCursor.pop(); cursorPushed = false }
     }
     override func updateTrackingAreas() {
         if let tracking { removeTrackingArea(tracking) }
-        tracking = NSTrackingArea(rect: .zero, options: [.mouseMoved, .mouseEnteredAndExited, .activeInKeyWindow, .inVisibleRect], owner: self)
+        tracking = NSTrackingArea(rect: .zero, options: [.mouseMoved, .mouseEnteredAndExited, .activeAlways, .inVisibleRect], owner: self)
         if let tracking { addTrackingArea(tracking) }
         super.updateTrackingAreas()
     }
@@ -3071,6 +3075,16 @@ private final class PDFViewerView: PDFView {
         scroll.reflectScrolledClipView(clip)
         refreshOverlay(); onViewportChange?()
     }
+    private func queueMagnification(_ delta: CGFloat,at point: CGPoint) {
+        guard delta.isFinite,delta != 0 else { return }
+        pendingZoom += delta; zoomAnchor = point
+        guard !zoomScheduled else { return }; zoomScheduled = true
+        DispatchQueue.main.async { [weak self] in
+            guard let self else { return }; self.zoomScheduled = false
+            let delta = self.pendingZoom,point = self.zoomAnchor; self.pendingZoom = 0; self.zoomAnchor = nil
+            if let point { self.applyMagnification(delta,at: point) }
+        }
+    }
     private func applyMagnification(_ delta: CGFloat, at anchor: CGPoint) {
         requestedScrollOrigin = nil; lastScrollOrigin = nil
         guard delta.isFinite, delta != 0 else { return }
@@ -3079,10 +3093,7 @@ private final class PDFViewerView: PDFView {
         autoScales = false
         scaleFactor = min(maxScaleFactor, max(minScaleFactor, scaleFactor * exp(delta)))
         layoutDocumentView()
-        layoutSubtreeIfNeeded()
         if let page, let pagePoint, let scroll = internalScrollView {
-            scroll.layoutSubtreeIfNeeded()
-            documentView?.layoutSubtreeIfNeeded()
             let clip = scroll.contentView
             // Older PDFKit releases adjust the clip origin during scale layout.
             // Recalculate the correction after layout, then once more after scroll.
@@ -3105,20 +3116,19 @@ private final class PDFViewerView: PDFView {
                 clip.setBoundsOrigin(origin)
                 clip.needsDisplay = true
                 scroll.reflectScrolledClipView(clip)
-                layoutSubtreeIfNeeded()
             }
         }
         refreshOverlay(); onViewportChange?()
     }
     override func scrollWheel(with event: NSEvent) {
         if event.modifierFlags.contains(.command) || event.modifierFlags.contains(.control) {
-            applyMagnification(-event.scrollingDeltaY * 0.01, at: convert(event.locationInWindow, from: nil))
+            queueMagnification(-event.scrollingDeltaY * (event.hasPreciseScrollingDeltas ? 0.01 : 0.08),at: HoverEventLocation.point(for: event,in: self) ?? convert(event.locationInWindow,from: nil))
         } else {
             if internalScrollView != nil { applyScroll(event) } else { super.scrollWheel(with: event) }
         }
     }
     override func magnify(with event: NSEvent) {
-        applyMagnification(event.magnification, at: convert(event.locationInWindow, from: nil))
+        queueMagnification(event.magnification,at: HoverEventLocation.point(for: event,in: self) ?? convert(event.locationInWindow,from: nil))
     }
     override func viewDidChangeEffectiveAppearance() {
         super.viewDidChangeEffectiveAppearance()
@@ -3215,6 +3225,7 @@ private extension DocumentManager {
 
 @MainActor
 private enum PDFRasterizer {
+    private static let backingDocuments = NSMapTable<PDFPage,PDFDocument>.weakToStrongObjects()
     static func image(_ page: PDFPage,size: CGSize) -> NSImage {
         NSImage(size: size,flipped: false) { rect in
             guard let ref = page.pageRef,let context = NSGraphicsContext.current?.cgContext else { return false }
@@ -3240,7 +3251,9 @@ private enum PDFRasterizer {
             y -= 16; offset += count
         }
         context.endPDFPage(); context.closePDF()
-        return PDFDocument(data: data as Data)?.page(at: 0)?.copy() as? PDFPage
+        guard let document = PDFDocument(data: data as Data),let page = document.page(at: 0)?.copy() as? PDFPage else { return nil }
+        backingDocuments.setObject(document,forKey: page)
+        return page
     }
 }
 
@@ -3810,12 +3823,10 @@ private final class ThumbnailGestureView: NSView {
         monitor = NSEvent.addLocalMonitorForEvents(matching: [.magnify,.scrollWheel]) { [weak self] event in
             var handled = false
             MainActor.assumeIsolated {
-                guard let self,event.window === self.window else { return }
-                let point = self.convert(event.locationInWindow,from: nil)
-                guard self.visibleRect.contains(point) else { return }
+                guard let self,let point = HoverEventLocation.point(for: event,in: self),self.visibleRect.contains(point) else { return }
                 if event.type == .magnify { self.adjust(Double(event.magnification)); handled = true }
                 else if event.modifierFlags.contains(.control) || event.modifierFlags.contains(.command) {
-                    self.adjust(Double(-event.scrollingDeltaY)*0.008); handled = true
+                    self.adjust(Double(-event.scrollingDeltaY)*(event.hasPreciseScrollingDeltas ? 0.01 : 0.12)); handled = true
                 }
             }
             return handled ? nil : event
@@ -3825,7 +3836,7 @@ private final class ThumbnailGestureView: NSView {
         guard delta.isFinite,let manager else { return }
         pendingValue = Self.zoom((pendingValue ?? manager.thumbnailZoom),delta: delta)
         guard !scheduled else { return }; scheduled = true
-        DispatchQueue.main.asyncAfter(deadline: .now()+0.016) { [weak self] in
+        DispatchQueue.main.async { [weak self] in
             guard let self else { return }; self.scheduled = false
             if let value = self.pendingValue { self.pendingValue = nil; self.manager?.thumbnailZoom = value }
         }
@@ -3841,7 +3852,9 @@ private final class PDFThumbnailCache {
     private(set) var renderCount = 0
     init() { cache.totalCostLimit = 48*1024*1024; cache.countLimit = 240 }
     func image(page: PDFPage,documentID: UUID,index: Int,revision: Int,width: CGFloat,ratio: CGFloat) -> NSImage {
-        let bucket = min(1200,max(64,Int((width*2/64).rounded())*64))
+        // Keep one detailed raster per page. Resizing the grid scales this image
+        // without rerendering complex CAD paths on every gesture event.
+        let bucket = 1024
         let key = "\(documentID.uuidString)|\(index)|\(revision)|\(bucket)" as NSString
         if let image = cache.object(forKey: key) { return image }
         let height = max(1,CGFloat(bucket)*max(0.1,min(12,ratio)))
@@ -3857,5 +3870,19 @@ private final class PDFThumbnailCache {
         guard let bitmap = context.makeImage() else { return NSImage(size: rect.size) }
         let image = NSImage(cgImage: bitmap,size: CGSize(width: width,height: width*ratio))
         cache.setObject(image,forKey: key,cost: w*h*4); renderCount += 1; return image
+    }
+}
+
+@MainActor
+private enum HoverEventLocation {
+    static func point(for event: NSEvent,in view: NSView) -> CGPoint? {
+        guard let window = view.window,window.isVisible,!view.isHiddenOrHasHiddenAncestor else { return nil }
+        // Gesture delivery follows the responder chain, which may still point
+        // at Search or a different pane. Route by the actual pointer instead.
+        let screen = NSEvent.mouseLocation
+        guard window.frame.contains(screen) else { return nil }
+        if let modal = NSApp.modalWindow,modal !== window { return nil }
+        if let eventWindow = event.window,eventWindow !== window,eventWindow.isKeyWindow { return nil }
+        return view.convert(window.convertPoint(fromScreen: screen),from: nil)
     }
 }

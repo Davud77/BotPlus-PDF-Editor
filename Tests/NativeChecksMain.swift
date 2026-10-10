@@ -2,6 +2,7 @@
 
 extension PDFViewerView {
     fileprivate func checkMagnify(_ delta: CGFloat, anchor: CGPoint) { applyMagnification(delta, at: anchor) }
+    fileprivate func checkQueuedMagnify(_ delta: CGFloat, anchor: CGPoint) { queueMagnification(delta,at: anchor) }
     fileprivate func checkDraw(page: PDFPage, start: CGPoint, end: CGPoint, tool: PDFTool) {
         commitDrawing(Preview(page: page, start: start, end: end, tool: tool))
     }
@@ -97,6 +98,13 @@ struct NativeChecks {
         expect(aligned, "gesture zoom retains its anchor within native clip alignment")
         pdf.checkMagnify(-0.15, anchor: anchor)
         expect(abs(pdf.scaleFactor - zoomBeforeGesture) < 0.001, "reverse trackpad gesture restores zoom")
+        let responderBefore = window.firstResponder
+        let queuedZoom = pdf.scaleFactor
+        pdf.checkQueuedMagnify(0.04,anchor: anchor); pdf.checkQueuedMagnify(0.06,anchor: anchor)
+        RunLoop.main.run(until: Date().addingTimeInterval(0.02))
+        expect(abs(pdf.scaleFactor - queuedZoom*exp(0.10)) < 0.001,"queued zoom preserves accumulated gesture deltas")
+        expect(window.firstResponder === responderBefore,"gesture zoom does not require a click or change focus")
+        pdf.checkMagnify(-0.10,anchor: anchor)
 
         // These run the same native drawing entry point used when a drag ends.
         pdf.strokeColor = NSColor.red.withAlphaComponent(0.45); pdf.strokeWidth = 3
@@ -517,10 +525,16 @@ private func runRibbonFeatureChecks(root: URL) throws {
     expect(ThumbnailGestureView.zoom(0.5,delta: 0.2) > 0.5,"pinch-out increases thumbnail size")
     expect(ThumbnailGestureView.zoom(0.5,delta: -0.2) < 0.5,"pinch-in decreases thumbnail size")
     expect(ThumbnailGestureView.zoom(0.99,delta: 2) == 1 && ThumbnailGestureView.zoom(0.01,delta: -2) == 0,"thumbnail gesture range is clamped")
+    let gesture = ThumbnailGestureView(frame: .zero); gesture.manager = manager
+    manager.thumbnailZoom = 0.5
+    gesture.adjust(0.1); gesture.adjust(0.1)
+    withExtendedLifetime(gesture) { RunLoop.main.run(until: Date().addingTimeInterval(0.05)) }
+    expect(abs(manager.thumbnailZoom-0.65) < 0.00001,"thumbnail gesture deltas coalesce without a focused thumbnail")
     let cache = PDFThumbnailCache(),key = UUID()
     let one = cache.image(page: page,documentID: key,index: 0,revision: 1,width: 100,ratio: 792/612)
     let two = cache.image(page: page,documentID: key,index: 0,revision: 1,width: 101,ratio: 792/612)
-    expect(one === two && cache.renderCount == 1,"nearby thumbnail sizes reuse one cached raster")
+    let enlarged = cache.image(page: page,documentID: key,index: 0,revision: 1,width: 600,ratio: 792/612)
+    expect(one === two && two === enlarged && cache.renderCount == 1,"thumbnail zoom reuses the same detailed raster through the whole width range")
     _ = cache.image(page: page,documentID: key,index: 0,revision: 2,width: 100,ratio: 792/612)
     expect(cache.renderCount == 2,"document edits invalidate thumbnail content")
     let panel = PanelWorkspaceModel(); panel.setWidth(380,for: .thumbnails); panel.select(.thumbnails); panel.select(.bookmarks)
