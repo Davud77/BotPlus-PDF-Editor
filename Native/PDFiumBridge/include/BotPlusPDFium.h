@@ -1,3 +1,6 @@
+// SPDX-License-Identifier: AGPL-3.0-only
+// Copyright (c) 2026 BotPlus
+
 #ifndef BOTPLUS_PDFIUM_H
 #define BOTPLUS_PDFIUM_H
 #include <stddef.h>

@@ -32,3 +32,19 @@ The macos-15-intel VM aborts inside Apple MTLLoader during offscreen ImageRender
 ## Значки интерфейса 1.1.2
 
 Нативная проверка перебирает команды всех 13 вкладок ленты. Проверяются системные компоненты составного значка «Добавить закладку», доступность разрешённых имён и стабильность кэшированного заменителя для отсутствующего значка. Эти проверки выполняются также на Intel CI. Аудит текущего SDK выявил единственное отсутствующее имя среди 133 проверенных — `bookmark.badge.plus`, теперь удалённое из интерфейса.
+
+## Version 1.2
+
+New native regressions cover:
+
+- the ten-file cap, deduplication, ordering, persisted sizes/dates and recent-file resolution in isolated UserDefaults;
+- blank-document creation without adding unsaved files to history, and license access without an open document;
+- release version comparisons and malformed tag rejection;
+- page range validation, independent margins with atomic rejection of invalid input, field alignment and replacement bookmark targets;
+- shared source/Undo bytes, content invalidation, and presentation changes that retain caches;
+- repeated native form value edits without a ribbon refresh, repeated annotation content/bounds changes, and live bookmark/attribute persistence;
+- performance measurement on a private PDF using temporary outputs only, plus preservation of searchable characters and vector/image object counts on all pages after a synthetic annotation save.
+
+`BOTPLUS_BENCH_PDF`, `BOTPLUS_BENCH_PAGES`, and `BOTPLUS_BENCH_REPORT` opt into the benchmark; `BOTPLUS_CHECK_OPTIMIZATION=-O` selects optimized compilation. `BOTPLUS_TRACE_SERIALIZATION=1` separates page-copy, writer and normalization timing. No extracted text or source path is written to the JSON report. Test history stores use separate preferences and never replace the user's recent-file list.
+
+The benchmark measures synchronous engine operations and cache reuse, not interactive frame rates or physical gestures. Cold page catalogs and font discovery can still take time. The shipping writer preserves streams only for an opened complete PDF whose original page identities/order, outline and document attributes are unchanged. It writes to a new temporary URL, reads the output, then atomically replaces the destination. Changed page graphs, outlines/attributes and restored/source-edited documents use an independent current page graph. Experiments with reconstructed byte-backed writers were rejected because tests caught stale forms, annotations and outlines. Structural cases remain more expensive. Native checks also exercise repeated widget edits with the stream-preserving writer and its fallback after outline/page changes.

@@ -1,3 +1,6 @@
+// SPDX-License-Identifier: AGPL-3.0-only
+// Copyright (c) 2026 BotPlus
+
 
 
 extension PDFViewerView {
@@ -20,8 +23,12 @@ struct NativeChecks {
             if !condition() { fatalError("CHECK FAILED: \(message)") }
         }
         let root = URL(fileURLWithPath: CommandLine.arguments[1], isDirectory: true)
+
         _ = NSApplication.shared
         NSApp.setActivationPolicy(.prohibited)
+        try checkRelease12(root: root)
+        if let path = ProcessInfo.processInfo.environment["BOTPLUS_BENCH_PDF"] { try benchmarkRelease12(root: root,path: path) }
+
         let customSymbols: Set<String> = ["botplus.floppy", "botplus.bookmark.plus"]
         var checkedSymbols = Set<String>()
         for tab in RibbonTab.allCases {
@@ -48,7 +55,7 @@ struct NativeChecks {
         document.page(at: 1)?.setBounds(CGRect(x: 0, y: 0, width: 612, height: 792), for: .mediaBox)
         let initial = root.appendingPathComponent("native-checks.pdf")
         expect(document.write(to: initial), "initial PDF writes")
-        let manager = DocumentManager()
+        let manager = DocumentManager(recent: RecentPDFStore(defaults: UserDefaults(suiteName: "BotPlusNativeChecks")!))
         manager.open(initial)
         let item = manager.selected!
         let pdf = PDFViewerView(frame: CGRect(x: 0, y: 0, width: 500, height: 500))
@@ -101,12 +108,12 @@ struct NativeChecks {
         expect(RulerLabelFormatter.label(value: .infinity,minorInterval: 1,digits: 0,language: .en).isEmpty,"invalid ruler geometry is not formatted")
         let blankText = try PDFSourceTextReader.pages(data: Data(contentsOf: initial))
         expect(blankText == ["",""],"embedded-text reader keeps blank pages empty without OCR")
-        var canRenderOffscreen = true
+        var canRenderOffscreen = ProcessInfo.processInfo.environment["BOTPLUS_SKIP_OFFSCREEN"] != "1"
         #if arch(x86_64)
         // macos-15-intel is a headless VM: SwiftUI's offscreen renderer can
         // abort inside MTLLoader after returning its image. Real Intel Macs
         // still run this check; all numeric/PDF checks always run in CI.
-        canRenderOffscreen = ProcessInfo.processInfo.environment["CI"] != "true"
+        canRenderOffscreen = canRenderOffscreen && ProcessInfo.processInfo.environment["CI"] != "true"
         #endif
         if canRenderOffscreen {
             let rulerImage = ImageRenderer(content: RulerBar(axis: .horizontal,manager: manager).frame(width: 500,height: 24))
@@ -517,7 +524,7 @@ private func runRibbonFeatureChecks(root: URL) throws {
     let first = PDFRasterizer.textPage("Hello annotation tools\nSecond line for markup")!
     document.insert(first,at: 0); document.insert(PDFRasterizer.textPage("Second page")!,at: 1)
     let url = root.appendingPathComponent("ribbon-features.pdf"); expect(document.write(to: url),"create searchable source page")
-    let manager = DocumentManager(); manager.open(url); let item = manager.selected!,page = item.document.page(at: 0)!
+    let manager = DocumentManager(recent: RecentPDFStore(defaults: UserDefaults(suiteName: "BotPlusNativeChecks")!)); manager.open(url); let item = manager.selected!,page = item.document.page(at: 0)!
     let textOnly = try PDFSourceTextReader.pages(data: Data(contentsOf: url),indices: [0])
     expect(textOnly[0].contains("Hello annotation tools"),"embedded-text reader preserves source text without Vision")
     expect(manager.embeddedText(in: item,indices: [0])?.contains("Hello annotation tools") == true,"document text commands use the existing text layer")
@@ -602,4 +609,201 @@ private func runRibbonFeatureChecks(root: URL) throws {
     expect(imageDoc.dataRepresentation() != nil,"inserted image survives PDFKit persistence")
     coordinator.detach()
     print("PASS: colored markup, vector drawings, notes, stamps, links, forms, bookmarks/TOC, fixed dock widths, and PDF image insertion")
+}
+
+@MainActor
+private func checkRelease12(root: URL) throws {
+    func expect(_ value: @autoclosure () -> Bool,_ message: String) { if !value() { fatalError("CHECK FAILED: "+message) } }
+    let suite = "BotPlusRelease12Checks-"+UUID().uuidString
+    let defaults = UserDefaults(suiteName: suite)!
+    defer { defaults.removePersistentDomain(forName: suite) }
+    let store = RecentPDFStore(defaults: defaults)
+    for index in 0..<12 {
+        let url = root.appendingPathComponent("recent-\(index).pdf")
+        try Data(repeating: 0,count: index+1).write(to: url); store.remember(url)
+    }
+    expect(store.files.count == 10,"recent list is capped at 10")
+    expect(store.files.first?.name == "recent-11.pdf","recent list is newest first")
+    store.remember(root.appendingPathComponent("recent-5.pdf"))
+    expect(store.files.count == 10 && store.files.first?.name == "recent-5.pdf","recent duplicate moves to front")
+    expect(store.files.first?.size == 6,"recent list stores actual byte size")
+    let reloaded = RecentPDFStore(defaults: defaults)
+    expect(reloaded.files.map(\.path) == store.files.map(\.path),"recent list persists")
+    let recentURL = try reloaded.resolve(reloaded.files[0]); expect(recentURL.lastPathComponent == "recent-5.pdf","recent path can be resolved")
+    expect(ReleaseUpdate.isNewer("v1.2.1",than: "1.2"),"patch update comparison")
+    expect(!ReleaseUpdate.isNewer("v1.2",than: "1.2"),"same release isn't an update")
+    expect(!ReleaseUpdate.isNewer("v1.1.2",than: "1.2"),"older release isn't an update")
+    expect(!ReleaseUpdate.isNewer("https://invalid.example",than: "1.2"),"malformed update tag is rejected")
+    expect(PDFPageRange.parse("1–3, 5, 2",count: 6) == [0,1,2,4],"page range parsing, normalization and duplicate removal")
+    expect(PDFPageRange.parse("4-2",count: 6) == nil,"reverse page range is rejected")
+    expect(PDFPageRange.parse("0,7",count: 6) == nil,"out-of-bounds range is rejected")
+    let manager = DocumentManager(recent: store)
+    manager.createBlankDocument()
+    expect(manager.selected?.isUntitled == true && manager.selected?.pageCount == 1,"start-screen blank command")
+    expect(store.files.count == 10,"unsaved blank files never enter recent list")
+    manager.perform(.feature("license")); expect(manager.isLicensePresented,"license works without a file dependency")
+    let item = manager.selected!
+    let before = manager.contentRevision
+    manager.perform(.tool(.textSelection)); manager.perform(.layout(.single)); manager.refreshPresentation()
+    expect(manager.contentRevision == before,"presentation-only changes don't invalidate thumbnail/text caches")
+    _ = try manager.serializedData(item)
+    let count = manager.serializationCount
+    _ = try manager.serializedData(item); _ = manager.snapshot(item)
+    expect(manager.serializationCount == count,"source and undo share immutable serialized bytes")
+    manager.send(.refresh); _ = try manager.serializedData(item)
+    expect(manager.serializationCount == count+1,"real document refresh invalidates serialized snapshot")
+    let page = item.document.page(at: 0)!
+    let liveField = PDFWidgetFactory.make(.formText,bounds: CGRect(x: 20,y: 100,width: 100,height: 20),name: "native-value",choices: [])
+    page.addAnnotation(liveField); manager.send(.refresh)
+    _ = try manager.serializedData(item); let beforeField = manager.serializationCount
+    liveField.widgetStringValue = "Filled through PDFKit"
+    let fieldData = try manager.serializedData(item)
+    expect(manager.serializationCount == beforeField+1,"native field edits invalidate cache without a ribbon refresh")
+    let reopenedField = PDFDocument(data: fieldData)?.page(at: 0)?.annotations.first { $0.fieldName == "native-value" }
+    expect(reopenedField?.widgetStringValue == "Filled through PDFKit","native field value survives cached save")
+    for value in ["Second fill","Third fill"] {
+        liveField.widgetStringValue = value
+        let bytes = try manager.serializedData(item)
+        let currentField = PDFDocument(data: bytes)?.page(at: 0)?.annotations.first { $0.fieldName == "native-value" }
+        expect(currentField?.widgetStringValue == value,"fresh writer doesn't return a previous native form value")
+    }
+    page.removeAnnotation(liveField); manager.send(.refresh)
+    _ = try manager.serializedData(item)
+    let shape = PDFAnnotation(bounds: CGRect(x: 60,y: 50,width: 70,height: 90),forType: .square,withProperties: nil)
+    shape.contents = "Live shape"; shape.color = .systemBlue; page.addAnnotation(shape)
+    let shapeBytes = try manager.serializedData(item)
+    expect(PDFDocument(data: shapeBytes)?.page(at: 0)?.annotations.contains(where: { $0.contents == "Live shape" }) == true,"byte-backed writer persists new annotations")
+    shape.bounds = CGRect(x: 30,y: 40,width: 50,height: 60); shape.contents = "Moved shape"
+    let movedBytes = try manager.serializedData(item)
+    let savedShape = PDFDocument(data: movedBytes)?.page(at: 0)?.annotations.first { $0.contents == "Moved shape" }
+    expect(savedShape?.bounds == shape.bounds,"byte-backed writer persists changed annotation bounds/content")
+    page.removeAnnotation(shape); manager.send(.refresh)
+    expect(PDFPageOperations.crop(item.document,indices: [0],left: 10,right: 20,top: 30,bottom: 40),"independent margins apply")
+    let box = page.bounds(for: .cropBox),media = page.bounds(for: .mediaBox)
+    expect(box.minX == media.minX+10 && box.minY == media.minY+40 && box.width == media.width-30 && box.height == media.height-70,"independent crop geometry")
+    expect(!PDFPageOperations.crop(item.document,indices: [0],left: .infinity,right: 0,top: 0,bottom: 0),"invalid crop doesn't partially change PDF")
+    expect(page.bounds(for: .cropBox) == box,"failed crop is atomic")
+    let field1 = PDFWidgetFactory.make(.formText,bounds: CGRect(x: 20,y: 200,width: 100,height: 20),name: "one",choices: [])
+    let field2 = PDFWidgetFactory.make(.formText,bounds: CGRect(x: 180,y: 100,width: 60,height: 30),name: "two",choices: [])
+    PDFPageOperations.align([field1,field2],mode: 2)
+    expect(field1.bounds.maxX == field2.bounds.maxX,"form fields align right without changing widths")
+    PDFPageOperations.align([field1,field2],mode: 4)
+    expect(field1.bounds.maxY == field2.bounds.maxY,"form fields align top")
+    let replacement = PDFDocument(); let newPage = PDFRasterizer.textPage("Replacement")!; replacement.insert(newPage,at: 0)
+    let rootOutline = PDFOutline(),node = PDFOutline(); node.label = "Retained bookmark"; node.destination = PDFDestination(page: page,at: CGPoint(x: 40,y: 400)); rootOutline.insertChild(node,at: 0); item.document.outlineRoot = rootOutline
+    expect(PDFPageOperations.replace(item.document,targets: [0],source: replacement,sources: [0]),"pages can be replaced")
+    expect(item.document.pageCount == 1 && node.destination?.page === item.document.page(at: 0),"replacement repairs bookmark targets")
+    let url = root.appendingPathComponent("replaced-check.pdf"); try PDFDocumentSerializer.save(item.document,to: url)
+    expect((PDFDocument(url: url)?.page(at: 0)?.string ?? "").contains("Replacement"),"replacement survives save/reopen")
+    _ = try manager.serializedData(item)
+    node.label = "Updated after initial save"; node.destination?.zoom = 2
+    item.document.documentAttributes = [PDFDocumentAttribute.titleAttribute:"Live title"]
+    let bookmarkBytes = try manager.serializedData(item),bookmarkPDF = PDFDocument(data: bookmarkBytes)
+    expect(bookmarkPDF?.outlineRoot?.child(at: 0)?.label == "Updated after initial save","live bookmark changes survive byte-backed snapshots")
+    expect(bookmarkPDF?.documentAttributes?[PDFDocumentAttribute.titleAttribute] as? String == "Live title","live attributes survive byte-backed snapshots")
+    let loaded = PDFDocument(data: bookmarkBytes)!
+    let streamItem = PDFDocumentItem(url: url,document: loaded,preserveStreams: true)
+    manager.insertDocument(streamItem); manager.seedSerializedData(bookmarkBytes,item: streamItem)
+    expect(streamItem.canPreserveStreams,"loaded complete PDF is eligible for stream-preserving snapshots")
+    let streamPage = loaded.page(at: 0)!
+    let streamField = PDFWidgetFactory.make(.formText,bounds: CGRect(x: 10,y: 80,width: 120,height: 30),name: "stream-field",choices: [])
+    streamPage.addAnnotation(streamField)
+    for value in ["First native value","Changed native value"] {
+        streamField.widgetStringValue = value
+        let bytes = try manager.serializedData(streamItem)
+        let saved = PDFDocument(data: bytes)?.page(at: 0)?.annotations.first { $0.fieldName == "stream-field" }
+        expect(saved?.widgetStringValue == value,"stream-preserving writer records repeated native field edits")
+    }
+    loaded.outlineRoot?.child(at: 0)?.label = "Stream bookmark update"
+    let streamBytes = try manager.serializedData(streamItem)
+    expect(PDFDocument(data: streamBytes)?.outlineRoot?.child(at: 0)?.label == "Stream bookmark update","stream-preserving writer records live bookmark edits")
+    loaded.insert(PDFRasterizer.textPage("New page")!,at: 0)
+    expect(!streamItem.canPreserveStreams,"page graph changes disable stream preservation")
+    print("PASS: recent files, blank start action, updates, cache invalidation, margins, field alignment and page replacement")
+}
+
+@MainActor
+private func benchmarkRelease12(root: URL,path: String) throws {
+    let source = URL(fileURLWithPath: path)
+    let lease = FileAccessLease(source); _ = lease
+    var timings: [[String:Any]] = []
+    func measure<T>(_ label: String,_ work: () throws -> T) rethrows -> T {
+        let begin = Date.timeIntervalSinceReferenceDate
+        let result = try work()
+        let milliseconds = (Date.timeIntervalSinceReferenceDate-begin)*1000
+        timings.append(["operation":label,"milliseconds":milliseconds]); print(String(format: "PERF %@ %.2f ms",label,milliseconds)); fflush(nil); return result
+    }
+    let manager = DocumentManager(recent: RecentPDFStore(defaults: UserDefaults(suiteName: "BotPlusBenchmark")!))
+    measure("open and seed immutable source",{ manager.open(source) })
+    guard let item = manager.selected else { throw PDFSourceError.document }; let document = item.document
+    let data = try measure("serialized snapshot cold",{ try manager.serializedData(item) })
+    _ = try measure("serialized snapshot warm (20 requests)",{
+        for _ in 0..<20 { _ = try manager.serializedData(item) }; return true
+    })
+    let cache = PDFThumbnailCache()
+    for index in [0,2].filter({ $0 < document.pageCount }) {
+        guard let page = document.page(at: index) else { continue }
+        let box = page.bounds(for: .cropBox),ratio = box.height/max(1,box.width)
+        _ = measure("thumbnail page \(index+1) cold",{ cache.image(page: page,documentID: item.id,index: index,revision: 0,width: 150,ratio: ratio) })
+        _ = measure("thumbnail page \(index+1) warm (20 requests)",{
+            for _ in 0..<20 { _ = cache.image(page: page,documentID: item.id,index: index,revision: 0,width: 150,ratio: ratio) }; return true
+        })
+    }
+    let indices = ProcessInfo.processInfo.environment["BOTPLUS_BENCH_PAGES"].flatMap { PDFPageRange.parse($0,count: document.pageCount) } ?? [0]
+    for index in indices where index < document.pageCount {
+        let blocks = try measure("text block catalog page \(index+1)",{ try PDFSourceSession.blocks(data: data,pageIndex: index) })
+        if let first = blocks.first {
+            _ = try measure("text editor session page \(index+1)",{ try PDFSourceSession.editing(data: data,pageIndex: index,point: first.point) })
+        }
+    }
+    _ = try measure("system and embedded font catalog",{ try PDFSourceSession.documentFonts(data: data) })
+    let output = root.appendingPathComponent("benchmark-copy.pdf")
+    try measure("save temporary copy",{ try PDFDocumentSerializer.write(try manager.serializedData(item),to: output) })
+    if let page = document.page(at: 0) {
+        let annotation = PDFAnnotation(bounds: CGRect(x: 20,y: 20,width: 40,height: 40),forType: .square,withProperties: nil)
+        page.addAnnotation(annotation); manager.send(.refresh)
+        let edited = try measure("snapshot after annotation edit",{ try manager.serializedData(item) })
+        let originalText = try PDFSourceTextReader.pages(data: data),savedText = try PDFSourceTextReader.pages(data: edited)
+        guard originalText.count == savedText.count else { fatalError("Benchmark save changed page count") }
+        for index in originalText.indices {
+            let original = originalText[index].filter { !$0.isWhitespace },saved = savedText[index].filter { !$0.isWhitespace }
+            if original != saved {
+                let sameScalars = original.unicodeScalars.map(\.value).sorted() == saved.unicodeScalars.map(\.value).sorted()
+                print("PERF text extraction page \(index+1): original \(original.count), saved \(saved.count), same scalar multiset \(sameScalars)")
+                fflush(nil)
+                guard sameScalars else { fatalError("Benchmark save changed searchable characters") }
+            }
+        }
+        func artwork(_ bytes: Data) throws -> [[Int]] {
+            let storage = bytes as NSData
+            guard let native = FPDF_LoadMemDocument64(storage.bytes,storage.length,nil) else { throw PDFSourceError.document }
+            defer { FPDF_CloseDocument(native) }
+            var pages: [[Int]] = []
+            func count(_ object: FPDF_PAGEOBJECT,depth: Int,into counts: inout [Int]) {
+                guard depth < 32 else { return }
+                let kind = FPDFPageObj_GetType(object)
+                if kind == FPDF_PAGEOBJ_PATH { counts[0] += 1 }
+                if kind == FPDF_PAGEOBJ_IMAGE { counts[1] += 1 }
+                if kind == FPDF_PAGEOBJ_FORM {
+                    for index in 0..<max(0,FPDFFormObj_CountObjects(object)) {
+                        if let child = FPDFFormObj_GetObject(object,UInt(index)) { count(child,depth: depth+1,into: &counts) }
+                    }
+                }
+            }
+            for index in 0..<FPDF_GetPageCount(native) {
+                guard let page = FPDF_LoadPage(native,index) else { throw PDFSourceError.page }
+                var counts = [0,0]
+                for index in 0..<max(0,FPDFPage_CountObjects(page)) { if let object = FPDFPage_GetObject(page,index) { count(object,depth: 0,into: &counts) } }
+                pages.append(counts); FPDF_ClosePage(page)
+            }
+            return pages
+        }
+        guard try artwork(data) == artwork(edited) else { fatalError("Benchmark save changed vector/image object counts") }
+        print("PASS: benchmark annotation save preserves searchable characters and vector/image counts on every page")
+        try measure("save edited temporary copy",{ try PDFDocumentSerializer.write(try manager.serializedData(item),to: output) })
+    }
+    let report: [String:Any] = ["appVersion":BotPlusBrand.version,"pageCount":document.pageCount,"inputBytes":data.count,"serializationCount":manager.serializationCount,"thumbnailRenders":cache.renderCount,"timings":timings]
+    let reportData = try JSONSerialization.data(withJSONObject: report,options: [.prettyPrinted,.sortedKeys])
+    if let reportPath = ProcessInfo.processInfo.environment["BOTPLUS_BENCH_REPORT"] { try reportData.write(to: URL(fileURLWithPath: reportPath)) }
+    print("PERF: report complete; source PDF was read only")
 }

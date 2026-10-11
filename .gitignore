@@ -41,3 +41,6 @@ xcuserdata/
 # Release disk images and checksums
 dist/
 *.dmg
+
+# Local performance reports (no sample PDFs are committed)
+performance*.json

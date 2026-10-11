@@ -1,3 +1,6 @@
+// SPDX-License-Identifier: AGPL-3.0-only
+// Copyright (c) 2026 BotPlus
+
 import SwiftUI
 import AppKit
 import PDFKit
@@ -7,7 +10,7 @@ import UniformTypeIdentifiers
 
 private enum BotPlusBrand {
     static let name = "BotPlus PDF Editor"
-    static let version = "1.1.2"
+    static let version = "1.2"
     static let copyright = "© 2026 BotPlus"
     static let supportURL = URL(string: "https://github.com/Davud77/BotPlus-PDF-Editor")!
     static let telegramURL = URL(string: "https://t.me/botplus_pdf")!
@@ -380,7 +383,10 @@ private final class PanelWorkspaceModel: NSObject, ObservableObject, NSWindowDel
 @MainActor
 private final class PDFDocumentItem: ObservableObject, Identifiable {
     let id = UUID()
-    @Published var url: URL
+    @Published var url: URL {
+        didSet { accessLease = FileAccessLease(url) }
+    }
+    private var accessLease: FileAccessLease
     @Published var document: PDFDocument
     @Published var pageIndex = 0
     @Published var zoom: CGFloat = 1
@@ -390,8 +396,22 @@ private final class PDFDocumentItem: ObservableObject, Identifiable {
     var redoHistory: [Snapshot] = []
     var historyGroup = ""
     var historyDate = Date.distantPast
+    private var streamIdentity: ObjectIdentifier?
+    private var streamPages: [ObjectIdentifier] = []
+    private var streamRoot: Int?
 
-    init(url: URL, document: PDFDocument) { self.url = url; self.document = document }
+    init(url: URL, document: PDFDocument,preserveStreams: Bool = false) {
+        self.url = url; self.document = document; accessLease = FileAccessLease(url)
+        if preserveStreams { enableStreamPreservation() }
+    }
+    func enableStreamPreservation() {
+        streamIdentity = ObjectIdentifier(document)
+        streamPages = (0..<pageCount).compactMap { document.page(at: $0).map(ObjectIdentifier.init) }
+        streamRoot = PDFDocumentState.rootStamp(document)
+    }
+    var canPreserveStreams: Bool {
+        streamIdentity == ObjectIdentifier(document) && streamRoot == PDFDocumentState.rootStamp(document) && streamPages == (0..<pageCount).compactMap { document.page(at: $0).map(ObjectIdentifier.init) }
+    }
     var filename: String { isUntitled ? "Untitled.pdf" : url.lastPathComponent }
     var pageCount: Int { document.pageCount }
 }
@@ -399,6 +419,21 @@ private final class PDFDocumentItem: ObservableObject, Identifiable {
 @MainActor
 private final class DocumentManager: ObservableObject {
     let panels = PanelWorkspaceModel()
+    let recent: RecentPDFStore
+    init(recent: RecentPDFStore = .shared) { self.recent = recent }
+    @Published var loadingFiles = 0
+    private var openingPaths = Set<String>()
+    @Published var isLicensePresented = false
+    @Published var isUpdatePresented = false
+    @Published var checkingUpdates = false
+    @Published var latestRelease: ReleaseUpdate?
+    @Published var updateError: String?
+    private var serializedIdentity: ObjectIdentifier?
+    private var serializedRevision = -1
+    private var serializedStamp: Int?
+    private var serializedBytes: Data?
+    private(set) var serializationCount = 0
+
     @Published private(set) var documents: [PDFDocumentItem] = []
     @Published var selectedID: UUID?
     @Published var language: AppLanguage = .ru
@@ -456,20 +491,46 @@ private final class DocumentManager: ObservableObject {
         panel.canChooseDirectories = false
         panel.begin { [weak self] response in
             guard response == .OK else { return }
-            DispatchQueue.main.async { for url in panel.urls { self?.open(url) } }
+            DispatchQueue.main.async { for url in panel.urls { self?.openAsync(url) } }
+        }
+    }
+
+    func openAsync(_ url: URL) {
+        guard url.pathExtension.lowercased() == "pdf" else { say("Please choose a PDF file.","Выберите файл PDF."); return }
+        if let existing = documents.first(where: { $0.url.standardizedFileURL == url.standardizedFileURL }) { recent.remember(url); select(existing.id); return }
+        guard finishSourceEditing?() != false else { return }
+        let path = url.standardizedFileURL.path
+        guard openingPaths.insert(path).inserted else { return }
+        loadingFiles += 1
+        Task { @MainActor [weak self] in
+            guard let self else { return }
+            let lease = FileAccessLease(url)
+            defer { _ = lease; openingPaths.remove(path); loadingFiles -= 1 }
+            do {
+                let data = try await Task.detached(priority: .userInitiated) { try Data(contentsOf: url,options: .mappedIfSafe) }.value
+                guard let document = PDFDocument(data: data) else { throw PDFSourceError.document }
+                AnnotationMetadata.restore(document)
+                let item = PDFDocumentItem(url: url,document: document,preserveStreams: true)
+                documents.append(item); recent.remember(url); select(item.id)
+                seedSerializedData(data,item: item)
+            } catch { say("The PDF could not be opened. Select the file again if access expired.","Не удалось открыть PDF. Если доступ истёк, выберите файл снова.") }
         }
     }
 
     func open(_ url: URL) {
         guard url.pathExtension.lowercased() == "pdf" else { say("Please choose a PDF file.", "Выберите файл PDF."); return }
         if let existing = documents.first(where: { $0.url.standardizedFileURL == url.standardizedFileURL }) {
-            select(existing.id); return
+            recent.remember(url); select(existing.id); return
         }
+        let access = url.startAccessingSecurityScopedResource()
+        defer { if access { url.stopAccessingSecurityScopedResource() } }
         guard let document = PDFDocument(url: url) else { say("The PDF could not be opened.", "Не удалось открыть PDF-файл."); return }
         AnnotationMetadata.restore(document)
-        let item = PDFDocumentItem(url: url, document: document)
+        let item = PDFDocumentItem(url: url, document: document,preserveStreams: true)
         documents.append(item)
+        recent.remember(url)
         select(item.id)
+        if let data = try? Data(contentsOf: url,options: .mappedIfSafe) { seedSerializedData(data,item: item) }
     }
 
     func select(_ id: UUID) {
@@ -477,7 +538,7 @@ private final class DocumentManager: ObservableObject {
         if selectedID != id { selectedOutline = nil }
         selectedID = id
         pageText = String((documents.first(where: { $0.id == id })?.pageIndex ?? 0) + 1)
-        send(.refresh)
+        refreshPresentation()
     }
 
     func close(_ id: UUID) {
@@ -491,6 +552,22 @@ private final class DocumentManager: ObservableObject {
         }
     }
 
+    func serializedData(_ item: PDFDocumentItem) throws -> Data {
+        let identity = ObjectIdentifier(item.document)
+        let stamp = PDFDocumentState.stamp(item.document)
+        if serializedIdentity == identity,serializedRevision == contentRevision,serializedStamp == stamp,let data = serializedBytes { return data }
+        let data = try PDFDocumentSerializer.data(item.document,preserveStreams: item.canPreserveStreams)
+        serializationCount += 1; serializedIdentity = identity; serializedRevision = contentRevision
+        serializedStamp = stamp
+        serializedBytes = data.count <= 64*1024*1024 ? data : nil
+        return data
+    }
+    func seedSerializedData(_ data: Data,item: PDFDocumentItem) {
+        serializedIdentity = ObjectIdentifier(item.document); serializedRevision = contentRevision
+        serializedStamp = PDFDocumentState.stamp(item.document)
+        serializedBytes = data.count <= 64*1024*1024 ? data : nil
+    }
+    func refreshPresentation() { command = .refresh; commandIndex &+= 1 }
     func send(_ next: ViewerCommand) { if next == .refresh { contentRevision &+= 1 }; command = next; commandIndex &+= 1 }
     func navigate(to index: Int) {
         guard finishSourceEditing?() != false else { return }
@@ -509,7 +586,7 @@ private final class DocumentManager: ObservableObject {
         guard finishSourceEditing?() != false else { return }
         guard let selected else { say("Open a PDF first.", "Сначала откройте PDF-файл."); return }
         if selected.isUntitled { saveDocumentAs(); return }
-        do { try PDFDocumentSerializer.save(selected.document,to: selected.url) }
+        do { try PDFDocumentSerializer.write(try serializedData(selected),to: selected.url); recent.remember(selected.url) }
         catch { say("Could not save the PDF.","Не удалось сохранить PDF-файл.") }
     }
     func saveDocumentAs() {
@@ -521,9 +598,10 @@ private final class DocumentManager: ObservableObject {
         panel.begin { [weak self] response in
             guard response == .OK,let url = panel.url else { return }
             DispatchQueue.main.async {
-                do { try PDFDocumentSerializer.save(selected.document,to: url) }
-                catch { self?.say("Could not save the PDF.","Не удалось сохранить PDF-файл."); return }
-                selected.url = url; selected.isUntitled = false; self?.send(.refresh)
+                guard let self else { return }
+                do { try PDFDocumentSerializer.write(try self.serializedData(selected),to: url) }
+                catch { self.say("Could not save the PDF.","Не удалось сохранить PDF-файл."); return }
+                selected.url = url; selected.isUntitled = false; self.recent.remember(url); self.refreshPresentation()
             }
         }
     }
@@ -533,6 +611,8 @@ private final class DocumentManager: ObservableObject {
     }
     func perform(_ action: RibbonAction) {
         if case .feature(let id) = action {
+            if id == "license" { isLicensePresented = true; return }
+            if id == "updates" { checkUpdates(); return }
             if id == "undo" || id == "redo" { undoDocument(redo: id == "redo"); return }
             if id == "blank" { createBlankDocument(); return }
             if id == "newWindow" { PDFWindowPool.shared.open(); return }
@@ -553,8 +633,8 @@ private final class DocumentManager: ObservableObject {
         case .settings: tab = .help
         case .tool(let next):
             guard finishSourceEditing?() != false else { return }
-            tool = next; send(.refresh)
-        case .layout(let next): layout = next; send(.refresh)
+            tool = next; refreshPresentation()
+        case .layout(let next): layout = next; refreshPresentation()
         case .zoomIn: send(.zoomIn)
         case .zoomOut: send(.zoomOut)
         case .actualSize: send(.actualSize)
@@ -777,6 +857,9 @@ private struct ContentView: View {
             WorkspaceArea(manager: manager).onDrop(of: [UTType.fileURL], isTargeted: nil, perform: receivePDFs)
             StatusBar(manager: manager)
         }
+        .overlay(alignment: .bottomTrailing) {
+            if manager.loadingFiles > 0 { HStack { ProgressView().controlSize(.small); Text(manager.language == .ru ? "Открытие PDF…" : "Opening PDF…").font(.system(size: 11)) }.padding(9).background(Palette.panel,in: RoundedRectangle(cornerRadius: 5)).padding(30) }
+        }
         .background(Palette.ribbon)
         .background(WindowTitleSynchronizer(title: manager.title).frame(width: 0, height: 0))
         .background(WindowChromeConfigurator(theme: manager.theme).frame(width: 0, height: 0))
@@ -791,6 +874,8 @@ private struct ContentView: View {
         .onChange(of: manager.language) { _, _ in manager.panels.synchronizeFloatingWindows(manager: manager) }
         .onChange(of: manager.theme) { _, _ in manager.panels.synchronizeFloatingWindows(manager: manager) }
         .sheet(isPresented: $manager.isAboutPresented) { AboutDialog(manager: manager) }
+        .sheet(isPresented: $manager.isLicensePresented) { LicenseDialog(manager: manager) }
+        .sheet(isPresented: $manager.isUpdatePresented) { UpdateDialog(manager: manager) }
         .alert(manager.language == .ru ? "Сообщение" : "Notice", isPresented: Binding(
             get: { manager.notice != nil }, set: { if !$0 { manager.notice = nil } }
         )) {
@@ -804,7 +889,7 @@ private struct ContentView: View {
             accepted = true
             _ = provider.loadObject(ofClass: URL.self) { url, _ in
                 guard let url else { return }
-                Task { @MainActor in manager.open(url) }
+                Task { @MainActor in manager.openAsync(url) }
             }
         }
         return accepted
@@ -935,7 +1020,7 @@ private struct QuickBar: View {
                 Spacer(minLength: 8)
                 HStack(spacing: 6) {
                     SystemSymbolImage(name: "magnifyingglass").foregroundStyle(Palette.muted)
-                    TextField(manager.language == .ru ? "Поиск / Быстрый поиск…" : "Search / Quick Search…", text: $manager.searchText, onCommit: { manager.send(.refresh) })
+                    TextField(manager.language == .ru ? "Поиск / Быстрый поиск…" : "Search / Quick Search…", text: $manager.searchText, onCommit: { manager.refreshPresentation() })
                         .textFieldStyle(.plain).frame(width: 158)
                 }.padding(.horizontal, 8).frame(height: 25).background(Palette.raised, in: RoundedRectangle(cornerRadius: 4)).padding(.trailing, 10)
             }
@@ -1258,16 +1343,20 @@ private struct DocumentTabs: View {
 private struct EmptyWorkspace: View {
     @ObservedObject var manager: DocumentManager
     var body: some View {
-        VStack(spacing: 13) {
-            SystemSymbolImage(name: "doc.text.viewfinder").font(.system(size: 44, weight: .ultraLight)).foregroundStyle(Palette.muted)
-            Text(manager.language == .ru ? "Документ не открыт" : "No document open").font(.system(size: 17, weight: .medium))
-            Text(manager.language == .ru ? "Дважды щёлкните здесь или перетащите PDF-файл" : "Double-click here or drop a PDF file to open")
-                .font(.system(size: 12)).foregroundStyle(Palette.muted)
-            Button { manager.openPanel() } label: { Label(manager.language == .ru ? "Открыть PDF" : "Open PDF", systemImage: "folder") }
-                .buttonStyle(.borderedProminent).tint(Palette.accent).padding(.top, 5)
-        }
-        .frame(maxWidth: .infinity, maxHeight: .infinity).contentShape(Rectangle())
-        .onTapGesture(count: 2) { manager.openPanel() }
+        ScrollView {
+            VStack(spacing: 22) {
+                VStack(spacing: 13) {
+                    SystemSymbolImage(name: "doc.text.viewfinder").font(.system(size: 44,weight: .ultraLight)).foregroundStyle(Palette.muted)
+                    Text(manager.language == .ru ? "Документ не открыт" : "No document open").font(.system(size: 17,weight: .medium))
+                    Text(manager.language == .ru ? "Дважды щёлкните здесь или перетащите PDF-файл" : "Double-click here or drop a PDF file to open").font(.system(size: 12)).foregroundStyle(Palette.muted)
+                }.frame(maxWidth: .infinity).contentShape(Rectangle()).onTapGesture(count: 2) { manager.openPanel() }
+                HStack(spacing: 12) {
+                    Button { manager.openPanel() } label: { Label(manager.language == .ru ? "Открыть PDF" : "Open PDF",systemImage: "folder") }.buttonStyle(.borderedProminent).tint(Palette.accent)
+                    Button { manager.createBlankDocument() } label: { Label(manager.language == .ru ? "Создать пустой" : "Create blank",systemImage: "doc.badge.plus") }.buttonStyle(.bordered)
+                }
+                RecentPDFList(store: manager.recent,manager: manager)
+            }.padding(.vertical,32).frame(maxWidth: .infinity)
+        }.frame(maxWidth: .infinity,maxHeight: .infinity)
     }
 }
 
@@ -1914,7 +2003,7 @@ private struct PDFViewer: NSViewRepresentable {
             view.onMarkupFinished = { [weak self,weak view] in
                 guard let self,let view else { return }
                 let subtype: PDFAnnotationSubtype = view.activeTool == .underline ? .underline : (view.activeTool == .strike ? .strikeOut : .highlight)
-                if (view.currentSelection?.string ?? "").isEmpty { view.selectAnnotation(nil) }
+                if view.currentSelection == nil { view.selectAnnotation(nil) }
                 else { self.addMarkup(on: view,subtype: subtype) }
             }
             view.onPlaceObject = { [weak self,weak view] page,point,tool in
@@ -2133,10 +2222,7 @@ private struct PDFViewer: NSViewRepresentable {
 
         private func sourceData(_ item: PDFDocumentItem) throws -> Data {
             guard item.document.allowsDocumentChanges else { throw PDFSourceError.permission }
-            AnnotationMetadata.prepareForSave(item.document)
-            defer { AnnotationMetadata.removeContainers(item.document) }
-            let data = try PDFDocumentSerializer.data(item.document)
-            return data
+            return try manager.serializedData(item)
         }
         private func sourceError(_ error: Error) {
             if let error = error as? PDFSourceError { manager.say(error.english, error.russian) }
@@ -2153,6 +2239,7 @@ private struct PDFViewer: NSViewRepresentable {
                 view.setSourceSelection((page, bounds)); sourceAnchor = (index, anchor ?? CGPoint(x: bounds.midX, y: bounds.midY))
             } else { view.setSourceSelection(nil); sourceAnchor = nil }
             manager.pageText = String(index + 1); manager.send(.refresh)
+            manager.seedSerializedData(data,item: item)
         }
         private func finishSourceEditor() -> Bool {
             guard let inline = view?.sourceInline else { return true }
@@ -3258,7 +3345,7 @@ private extension DocumentManager {
             }
             let missing = indices.filter { embeddedTextCache[$0] == nil }
             if !missing.isEmpty {
-                if embeddedTextData == nil { embeddedTextData = try PDFDocumentSerializer.data(item.document) }
+                if embeddedTextData == nil { embeddedTextData = try serializedData(item) }
                 guard let data = embeddedTextData else { return nil }
                 let pages = try PDFSourceTextReader.pages(data: data,indices: missing)
                 for (index,text) in zip(missing,pages) { embeddedTextCache[index] = text }
@@ -3398,12 +3485,16 @@ private extension PDFViewer.Coordinator {
         if let tool = tools[id] {
             if tool == .stamp { manager.annotationColor = .red; manager.annotationOpacity = 1 }
             if tool == .note { manager.annotationColor = .yellow; manager.annotationOpacity = 1 }
-            manager.tool = tool; manager.panels.select(.properties); manager.send(.refresh); return }
+            manager.tool = tool; manager.panels.select(.properties); manager.refreshPresentation(); return }
         let page = view.currentPage ?? item.document.page(at: item.pageIndex)
         if ["bookmarkCase","bookmarkZoom","bookmarkActions","bookmarkSort","bookmarkMerge","bookmarkTOC","bookmarkSortPages","bookmarkLinks","swap","clear"].contains(id) { manager.recordUndo(item,group: id) }
         switch id {
+        case "margins": cropMargins(item: item,view: view)
+        case "replace": replacePages(item: item,view: view)
+        case "alignFields": alignFields(item: item,view: view)
+        case "emailCurrent","emailAll": emailPDF(item: item,view: view,currentPage: id == "emailCurrent")
         case "strike": manager.activateMarkup(.strike)
-        case "edit","editContent": manager.tool = .editText; manager.send(.refresh)
+        case "edit","editContent": manager.tool = .editText; manager.refreshPresentation()
         case "editLink":
             manager.tool = .selectComments
             if let annotation = view.selectedAnnotation,annotation.type == "Link" { manager.editLink(annotation) }
@@ -3767,8 +3858,7 @@ private extension PDFViewer.Coordinator {
 @MainActor
 private extension DocumentManager {
     func snapshot(_ item: PDFDocumentItem) -> PDFDocumentItem.Snapshot? {
-        AnnotationMetadata.prepareForSave(item.document); defer { AnnotationMetadata.removeContainers(item.document) }
-        guard let data = try? PDFDocumentSerializer.data(item.document) else { return nil }
+        guard let data = try? serializedData(item) else { return nil }
         return PDFDocumentItem.Snapshot(data: data,page: item.pageIndex,zoom: item.zoom,bookmarks: PDFBookmarkStore.capture(item.document))
     }
     func recordUndo(_ item: PDFDocumentItem,group: String) {
@@ -3790,6 +3880,7 @@ private extension DocumentManager {
         selectedOutline = nil; selectedAnnotation = nil; selectedContent = nil
         item.document = document; item.pageIndex = min(max(0,state.page),document.pageCount-1); item.zoom = state.zoom
         item.historyGroup = ""; item.historyDate = .distantPast; pageText = String(item.pageIndex+1); send(.refresh)
+        seedSerializedData(state.data,item: item)
     }
 }
 
@@ -3801,9 +3892,76 @@ private extension PDFViewerView {
 }
 
 @MainActor
+private enum PDFDocumentState {
+    static func rootStamp(_ document: PDFDocument) -> Int {
+        var hash = Hasher()
+        let attributes: [AnyHashable:Any] = document.documentAttributes ?? [:]
+        for key in attributes.keys.sorted(by: { String(describing: $0) < String(describing: $1) }) { hash.combine(key); hash.combine(String(describing: attributes[key]!)) }
+        func visit(_ node: PDFOutline,depth: Int) {
+            guard depth < 64 else { return }
+            hash.combine(node.label); hash.combine(node.numberOfChildren)
+            if let destination = node.destination {
+                hash.combine(destination.page.map { document.index(for: $0) }); hash.combine(destination.point.x)
+                hash.combine(destination.point.y); hash.combine(destination.zoom)
+            }
+            hash.combine(node.action?.type)
+            if let action = node.action as? PDFActionURL { hash.combine(action.url?.absoluteString) }
+            for index in 0..<node.numberOfChildren { if let child = node.child(at: index) { visit(child,depth: depth+1) } }
+        }
+        if let root = document.outlineRoot { visit(root,depth: 0) }
+        return hash.finalize()
+    }
+    // Native PDFKit form filling can change values without a ribbon command.
+    // Include that state so a cached source/Undo/save never loses those edits.
+    static func stamp(_ document: PDFDocument) -> Int {
+        var hash = Hasher(); hash.combine(document.pageCount)
+        for index in 0..<document.pageCount {
+            guard let page = document.page(at: index) else { continue }
+            hash.combine(ObjectIdentifier(page)); hash.combine(page.rotation)
+            for kind in [PDFDisplayBox.mediaBox,.cropBox] {
+                let box = page.bounds(for: kind)
+                for value in [box.origin.x,box.origin.y,box.width,box.height] { hash.combine(value) }
+            }
+            hash.combine(page.annotations.count)
+            for annotation in page.annotations {
+                hash.combine(ObjectIdentifier(annotation)); hash.combine(annotation.contents)
+                hash.combine(annotation.widgetStringValue); hash.combine(annotation.widgetControlType.rawValue)
+                hash.combine(annotation.buttonWidgetState.rawValue)
+                for value in [annotation.bounds.minX,annotation.bounds.minY,annotation.bounds.width,annotation.bounds.height] { hash.combine(value) }
+                hash.combine(annotation.color.description); hash.combine(annotation.font?.fontName); hash.combine(annotation.font?.pointSize)
+                hash.combine(annotation.border?.lineWidth)
+                let values = annotation.annotationKeyValues
+                for key in values.keys.sorted(by: { String(describing: $0) < String(describing: $1) }) {
+                    hash.combine(key); hash.combine(String(describing: values[key]!))
+                }
+            }
+        }
+        let attributes: [AnyHashable:Any] = document.documentAttributes ?? [:]
+        for key in attributes.keys.sorted(by: { String(describing: $0) < String(describing: $1) }) {
+            hash.combine(key); hash.combine(String(describing: attributes[key]!))
+        }
+        func outlines(_ node: PDFOutline,depth: Int) {
+            guard depth < 64 else { return }
+            hash.combine(node.label); hash.combine(node.numberOfChildren)
+            if let destination = node.destination {
+                hash.combine(destination.page.map(ObjectIdentifier.init)); hash.combine(destination.point.x)
+                hash.combine(destination.point.y); hash.combine(destination.zoom)
+            }
+            hash.combine(node.action?.type)
+            if let action = node.action as? PDFActionURL { hash.combine(action.url?.absoluteString) }
+            for index in 0..<node.numberOfChildren { if let child = node.child(at: index) { outlines(child,depth: depth+1) } }
+        }
+        if let root = document.outlineRoot { outlines(root,depth: 0) }
+        return hash.finalize()
+    }
+}
+
+@MainActor
 private enum PDFDocumentSerializer {
     static func save(_ document: PDFDocument,to url: URL) throws {
-        let data = try self.data(document)
+        try write(try data(document),to: url)
+    }
+    static func write(_ data: Data,to url: URL) throws {
         if !FileManager.default.isUbiquitousItem(at: url) { try data.write(to: url,options: .atomic); return }
         var coordinationError: NSError?,writeError: Error?
         let coordinator = NSFileCoordinator(filePresenter: nil)
@@ -3812,20 +3970,30 @@ private enum PDFDocumentSerializer {
         }
         if let error = coordinationError ?? writeError as NSError? { throw error }
     }
-    static func data(_ document: PDFDocument) throws -> Data {
-        let bookmarks = PDFBookmarkStore.capture(document),copy = PDFDocument()
-        // Copy the current pages and annotations rather than PDFKit's cached
-        // dataRepresentation, which can omit live outline/form changes.
-        for index in 0..<document.pageCount {
+    static func data(_ document: PDFDocument,preserveStreams: Bool = false) throws -> Data {
+        let trace = ProcessInfo.processInfo.environment["BOTPLUS_TRACE_SERIALIZATION"] == "1"
+        let started = Date.timeIntervalSinceReferenceDate
+        let direct = preserveStreams
+        let bookmarks = PDFBookmarkStore.capture(document),copy = direct ? document : PDFDocument()
+        // A document loaded as one complete PDF can preserve its streams while
+        // its original page identities/order remain intact. Write only to a new
+        // temporary URL. Reassembled page graphs need an independent copy.
+        for index in 0..<(direct ? 0 : document.pageCount) {
             guard let original = document.page(at: index),let cloned = original.copy() as? PDFPage else { throw PDFSourceError.page }
             AnnotationMetadata.copy(from: original,to: cloned); copy.insert(cloned,at: copy.pageCount)
         }
         copy.documentAttributes = document.documentAttributes
-        PDFBookmarkStore.restore(bookmarks,on: copy); AnnotationMetadata.prepareForSave(copy)
+        if !direct { PDFBookmarkStore.restore(bookmarks,on: copy) }
+        AnnotationMetadata.prepareForSave(copy)
+        defer { if direct { AnnotationMetadata.removeContainers(copy) } }
+        let prepared = Date.timeIntervalSinceReferenceDate
         let url = FileManager.default.temporaryDirectory.appendingPathComponent("BotPlusSnapshot-"+UUID().uuidString+".pdf")
         defer { try? FileManager.default.removeItem(at: url) }
         guard copy.write(to: url,withOptions: [PDFDocumentWriteOption.saveTextFromOCROption:false]) else { throw PDFSourceError.save }
-        return try PDFSourceSession.validEmptyPageStreams(Data(contentsOf: url))
+        let written = Date.timeIntervalSinceReferenceDate
+        let data = try PDFSourceSession.validEmptyPageStreams(Data(contentsOf: url))
+        if trace { print(String(format: "PERF serializer copy %.2f ms; write %.2f ms; normalize %.2f ms",(prepared-started)*1000,(written-prepared)*1000,(Date.timeIntervalSinceReferenceDate-written)*1000)); fflush(nil) }
+        return data
     }
 }
 
@@ -3985,5 +4153,375 @@ private enum HoverEventLocation {
         if let modal = NSApp.modalWindow,modal !== window { return nil }
         if let eventWindow = event.window,eventWindow !== window,eventWindow.isKeyWindow { return nil }
         return view.convert(window.convertPoint(fromScreen: screen),from: nil)
+    }
+}
+
+// MARK: Start screen, recent files, licensing and updates
+private final class FileAccessLease {
+    private let url: URL
+    private let active: Bool
+    init(_ url: URL) { self.url = url; active = url.startAccessingSecurityScopedResource() }
+    deinit { if active { url.stopAccessingSecurityScopedResource() } }
+}
+private struct RecentPDF: Codable, Identifiable {
+    var id: UUID = UUID()
+    var path: String
+    var name: String
+    var size: Int64
+    var openedAt: Date
+    var modifiedAt: Date?
+    var bookmark: Data?
+}
+
+@MainActor
+private final class RecentPDFStore: ObservableObject {
+    static let shared = RecentPDFStore()
+    @Published private(set) var files: [RecentPDF]
+    private let defaults: UserDefaults
+    private let key = "BotPlusPDFEditor.recentPDFs.v1"
+    init(defaults: UserDefaults = .standard) {
+        self.defaults = defaults
+        files = Array(((defaults.data(forKey: key).flatMap { try? JSONDecoder().decode([RecentPDF].self,from: $0) }) ?? []).prefix(10))
+    }
+    func remember(_ url: URL) {
+        let path = url.standardizedFileURL.path
+        let old = files.first { $0.path == path }
+        let info = try? url.resourceValues(forKeys: [.fileSizeKey,.contentModificationDateKey])
+        let bookmark = (try? url.bookmarkData(options: [.withSecurityScope],includingResourceValuesForKeys: nil,relativeTo: nil)) ?? old?.bookmark
+        files.removeAll { $0.path == path }
+        files.insert(RecentPDF(id: old?.id ?? UUID(),path: path,name: url.lastPathComponent,size: Int64(info?.fileSize ?? 0),openedAt: Date(),modifiedAt: info?.contentModificationDate,bookmark: bookmark),at: 0)
+        files = Array(files.prefix(10)); persist()
+    }
+    func resolve(_ file: RecentPDF) throws -> URL {
+        guard let bookmark = file.bookmark else { return URL(fileURLWithPath: file.path) }
+        var stale = false
+        let url = try URL(resolvingBookmarkData: bookmark,options: [.withSecurityScope,.withoutUI],relativeTo: nil,bookmarkDataIsStale: &stale)
+        if stale { remember(url) }
+        return url
+    }
+    func remove(_ id: UUID) { files.removeAll { $0.id == id }; persist() }
+    func clear() { files.removeAll(); persist() }
+    private func persist() { if let data = try? JSONEncoder().encode(files) { defaults.set(data,forKey: key) } }
+}
+
+private struct RecentPDFList: View {
+    @ObservedObject var store: RecentPDFStore
+    @ObservedObject var manager: DocumentManager
+    var body: some View {
+        VStack(alignment: .leading,spacing: 8) {
+            HStack {
+                Text(manager.language == .ru ? "Последние файлы" : "Recent files").font(.system(size: 14,weight: .semibold))
+                Spacer()
+                Button(manager.language == .ru ? "Очистить список" : "Clear list") { store.clear() }.buttonStyle(.plain).font(.system(size: 10)).foregroundStyle(Palette.muted)
+            }
+            if store.files.isEmpty {
+                Text(manager.language == .ru ? "Здесь появятся последние 10 открытых PDF." : "Your last 10 opened PDFs will appear here.").font(.system(size: 11)).foregroundStyle(Palette.muted)
+            }
+            ForEach(store.files) { file in
+                Button { manager.openRecent(file) } label: {
+                    HStack(spacing: 12) {
+                        SystemSymbolImage(name: "doc.text").font(.system(size: 22)).foregroundStyle(Palette.accent)
+                        VStack(alignment: .leading,spacing: 3) {
+                            Text(file.name).font(.system(size: 12,weight: .medium)).lineLimit(1)
+                            Text(file.path).font(.system(size: 10)).foregroundStyle(Palette.muted).lineLimit(1).truncationMode(.middle)
+                        }.frame(maxWidth: .infinity,alignment: .leading)
+                        VStack(alignment: .trailing,spacing: 3) {
+                            Text(ByteCountFormatter.string(fromByteCount: file.size,countStyle: .file)).font(.system(size: 11))
+                            Text(file.openedAt,format: .dateTime.day().month().year().hour().minute()).font(.system(size: 10)).foregroundStyle(Palette.muted)
+                        }
+                    }.padding(10).background(Palette.raised,in: RoundedRectangle(cornerRadius: 5)).contentShape(Rectangle())
+                }.buttonStyle(.plain).help((manager.language == .ru ? "Открыт: " : "Opened: ")+file.openedAt.formatted()+"\n"+file.path)
+                .contextMenu { Button(manager.language == .ru ? "Убрать из списка" : "Remove from list") { store.remove(file.id) } }
+            }
+        }.frame(maxWidth: 760).padding(.horizontal,24)
+    }
+}
+
+private struct LicenseDialog: View {
+    @ObservedObject var manager: DocumentManager
+    private let terms: String = Bundle.main.url(forResource: "LICENSE",withExtension: nil).flatMap { try? String(contentsOf: $0,encoding: .utf8) } ?? "GNU Affero General Public License v3.0\nhttps://www.gnu.org/licenses/agpl-3.0.html"
+    var body: some View {
+        VStack(alignment: .leading,spacing: 12) {
+            Text("BotPlus PDF Editor — AGPL-3.0-only").font(.title3)
+            Text(manager.language == .ru ? "Исходный код доступен в репозитории проекта. Уведомления лицензий PDFium и его компонентов поставляются отдельно." : "Source code is available in the project repository. PDFium and its components retain their own license notices.").font(.system(size: 12))
+            ScrollView { Text(verbatim: terms).font(.system(size: 11,design: .monospaced)).textSelection(.enabled).frame(maxWidth: .infinity,alignment: .leading) }.padding(12).background(Palette.workspace)
+            HStack {
+                Link(manager.language == .ru ? "Исходный код" : "Source code",destination: BotPlusBrand.supportURL)
+                Spacer()
+                Button(manager.language == .ru ? "Закрыть" : "Close") { manager.isLicensePresented = false }.keyboardShortcut(.defaultAction)
+            }
+        }.padding(22).frame(width: 700,height: 560).background(Palette.ribbon).foregroundStyle(Palette.text).preferredColorScheme(manager.theme.colorScheme)
+    }
+}
+
+private struct ReleaseUpdate: Decodable, Sendable {
+    let tag_name: String
+    let name: String?
+    let body: String?
+    let prerelease: Bool
+    let draft: Bool
+    var pageURL: URL? {
+        guard tag_name.range(of: "^v?[0-9]+(?:\\.[0-9]+){1,2}$",options: .regularExpression) != nil else { return nil }
+        return URL(string: "https://github.com/Davud77/BotPlus-PDF-Editor/releases/tag/"+tag_name)
+    }
+    static func isNewer(_ candidate: String,than installed: String) -> Bool {
+        func parts(_ value: String) -> [Int]? {
+            let clean = value.hasPrefix("v") ? String(value.dropFirst()) : value
+            guard clean.range(of: "^[0-9]+(?:\\.[0-9]+){1,2}$",options: .regularExpression) != nil else { return nil }
+            let values = clean.split(separator: ".").compactMap { Int($0) }
+            guard values.count >= 2 else { return nil }; return Array((values+[0,0,0]).prefix(3))
+        }
+        guard let a = parts(candidate),let b = parts(installed) else { return false }
+        for (x,y) in zip(a,b) where x != y { return x > y }; return false
+    }
+}
+
+private struct UpdateDialog: View {
+    @ObservedObject var manager: DocumentManager
+    var body: some View {
+        VStack(alignment: .leading,spacing: 14) {
+            Text(manager.language == .ru ? "Обновления" : "Updates").font(.title2)
+            Text((manager.language == .ru ? "Установлена версия " : "Installed version ")+BotPlusBrand.version)
+            if manager.checkingUpdates { ProgressView(manager.language == .ru ? "Проверка GitHub Releases…" : "Checking GitHub Releases…") }
+            if let release = manager.latestRelease {
+                Text((ReleaseUpdate.isNewer(release.tag_name,than: BotPlusBrand.version) ? (manager.language == .ru ? "Доступна версия " : "Available version ") : (manager.language == .ru ? "Новых версий нет. Последний релиз: " : "No newer version. Latest release: "))+release.tag_name)
+                ScrollView { Text(verbatim: release.body ?? "").font(.system(size: 12)).frame(maxWidth: .infinity,alignment: .leading) }.frame(maxHeight: .infinity)
+                if let url = release.pageURL { Link(manager.language == .ru ? "Открыть релиз" : "Open release",destination: url) }
+            }
+            if let error = manager.updateError { Text(error).foregroundStyle(.orange) }
+            Spacer(minLength: 0)
+            HStack { Button(manager.language == .ru ? "Проверить снова" : "Check again") { manager.checkUpdates() }.disabled(manager.checkingUpdates); Spacer(); Button(manager.language == .ru ? "Закрыть" : "Close") { manager.isUpdatePresented = false }.keyboardShortcut(.defaultAction) }
+        }.padding(24).frame(width: 620,height: 480).background(Palette.ribbon).foregroundStyle(Palette.text).preferredColorScheme(manager.theme.colorScheme)
+    }
+}
+
+@MainActor
+private extension DocumentManager {
+    func openRecent(_ file: RecentPDF) {
+        do { openAsync(try recent.resolve(file)) }
+        catch { say("Access expired. Use Open PDF to select this file again.","Доступ к файлу истёк. Выберите его снова через «Открыть PDF».") }
+    }
+    func checkUpdates() {
+        isUpdatePresented = true
+        guard !checkingUpdates else { return }
+        checkingUpdates = true; updateError = nil
+        Task { @MainActor [weak self] in
+            guard let self else { return }; defer { self.checkingUpdates = false }
+            do {
+                var request = URLRequest(url: URL(string: "https://api.github.com/repos/Davud77/BotPlus-PDF-Editor/releases/latest")!)
+                request.timeoutInterval = 15; request.setValue("application/vnd.github+json",forHTTPHeaderField: "Accept"); request.setValue("BotPlusPDFEditor/"+BotPlusBrand.version,forHTTPHeaderField: "User-Agent")
+                let (data,response) = try await URLSession.shared.data(for: request)
+                guard (response as? HTTPURLResponse)?.statusCode == 200 else { throw URLError(.badServerResponse) }
+                let release = try JSONDecoder().decode(ReleaseUpdate.self,from: data)
+                guard !release.draft,!release.prerelease,release.pageURL != nil else { throw URLError(.cannotParseResponse) }
+                latestRelease = release
+            } catch { updateError = language == .ru ? "Не удалось проверить обновления. Проверьте сеть и повторите попытку." : "Could not check updates. Check your connection and try again." }
+        }
+    }
+}
+
+// MARK: First roadmap operations
+private enum PDFPageRange {
+    static func parse(_ text: String,count: Int) -> [Int]? {
+        guard count > 0 else { return nil }
+        let input = text.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
+        if input == "all" || input == "все" || input == "*" { return Array(0..<count) }
+        let tokens = input.replacingOccurrences(of: "–",with: "-").replacingOccurrences(of: "—",with: "-").replacingOccurrences(of: ";",with: ",").components(separatedBy: ",")
+        var result = Set<Int>()
+        for token in tokens {
+            let bounds = token.trimmingCharacters(in: .whitespaces).components(separatedBy: "-")
+            guard bounds.count == 1 || bounds.count == 2,let first = Int(bounds[0].trimmingCharacters(in: .whitespaces)),first > 0,first <= count else { return nil }
+            let last: Int
+            if bounds.count == 2 { guard let end = Int(bounds[1].trimmingCharacters(in: .whitespaces)),end >= first,end <= count else { return nil }; last = end } else { last = first }
+            result.formUnion((first-1)..<last)
+        }
+        return result.isEmpty ? nil : result.sorted()
+    }
+}
+
+@MainActor
+private enum PDFPageOperations {
+    private static let importedOwners = NSMapTable<PDFPage,PDFDocument>.weakToStrongObjects()
+    static func crop(_ document: PDFDocument,indices: [Int],left: Double,right: Double,top: Double,bottom: Double) -> Bool {
+        let offsets = [left,right,top,bottom]
+        guard !indices.isEmpty,offsets.allSatisfy({ $0.isFinite && $0 >= 0 }) else { return false }
+        var targets: [(PDFPage,CGRect)] = []
+        for index in indices {
+            guard let page = document.page(at: index) else { return false }
+            let media = page.bounds(for: .mediaBox)
+            let box = CGRect(x: media.minX+left,y: media.minY+bottom,width: media.width-left-right,height: media.height-top-bottom)
+            guard box.width > 1,box.height > 1 else { return false }; targets.append((page,box))
+        }
+        for (page,box) in targets { page.setBounds(box,for: .cropBox) }; return true
+    }
+    static func replace(_ document: PDFDocument,targets: [Int],source: PDFDocument,sources: [Int]) -> Bool {
+        guard !targets.isEmpty,targets.count == sources.count else { return false }
+        var prepared: [(index: Int,old: PDFPage,copy: PDFPage)] = []
+        var imported: [ObjectIdentifier:PDFPage] = [:]
+        var replaced: [ObjectIdentifier:PDFPage] = [:]
+        for (index,sourceIndex) in zip(targets,sources) {
+            guard let old = document.page(at: index),let original = source.page(at: sourceIndex),let copy = original.copy() as? PDFPage else { return false }
+            AnnotationMetadata.copy(from: original,to: copy); importedOwners.setObject(source,forKey: copy)
+            prepared.append((index,old,copy)); imported[ObjectIdentifier(original)] = copy; replaced[ObjectIdentifier(old)] = copy
+        }
+        func destination(_ old: PDFDestination,map: [ObjectIdentifier:PDFPage]) -> PDFDestination? {
+            guard let page = old.page,let new = map[ObjectIdentifier(page)] else { return nil }
+            let next = PDFDestination(page: new,at: old.point); next.zoom = old.zoom; return next
+        }
+        // Remap imported links before installing pages; omit targets that were
+        // not imported rather than retaining a pointer into another document.
+        for entry in prepared { for annotation in entry.copy.annotations {
+            if let action = annotation.action as? PDFActionGoTo {
+                if let next = destination(action.destination,map: imported) { annotation.action = PDFActionGoTo(destination: next) }
+                else { annotation.action = nil }
+            }
+        } }
+        for entry in prepared { document.removePage(at: entry.index); document.insert(entry.copy,at: entry.index) }
+        func outlines(_ root: PDFOutline) {
+            if let old = root.destination,let next = destination(old,map: replaced) { root.destination = next }
+            if let action = root.action as? PDFActionGoTo,let next = destination(action.destination,map: replaced) { root.action = PDFActionGoTo(destination: next) }
+            for index in 0..<root.numberOfChildren { if let child = root.child(at: index) { outlines(child) } }
+        }
+        if let root = document.outlineRoot { outlines(root) }
+        for index in 0..<document.pageCount { for annotation in document.page(at: index)?.annotations ?? [] {
+            if let action = annotation.action as? PDFActionGoTo,let next = destination(action.destination,map: replaced) { annotation.action = PDFActionGoTo(destination: next) }
+        } }
+        return true
+    }
+    static func align(_ fields: [PDFAnnotation],mode: Int) {
+        guard let anchor = fields.first,fields.count >= 2 else { return }
+        let target = anchor.bounds
+        for field in fields.dropFirst() {
+            var rect = field.bounds
+            switch mode {
+            case 1: rect.origin.x = target.minX
+            case 2: rect.origin.x = target.maxX-rect.width
+            case 3: rect.origin.x = target.midX-rect.width/2
+            case 4: rect.origin.y = target.maxY-rect.height
+            case 5: rect.origin.y = target.minY
+            case 6: rect.origin.y = target.midY-rect.height/2
+            default: return
+            }
+            field.bounds = rect
+        }
+    }
+}
+
+@MainActor
+private final class FieldAlignmentSelection: ObservableObject {
+    @Published var indices = Set<Int>()
+    @Published var mode = 1
+}
+
+private struct FieldAlignmentDialog: View {
+    let fields: [PDFAnnotation]
+    let russian: Bool
+    let commit: ([Int],Int) -> Void
+    let close: () -> Void
+    @StateObject private var selection = FieldAlignmentSelection()
+    var body: some View {
+        VStack(alignment: .leading,spacing: 12) {
+            Text(russian ? "Выравнивание полей текущей страницы" : "Align fields on current page").font(.title3)
+            Text(russian ? "Опорное поле — первое выбранное в списке. Направления заданы в координатах PDF." : "The first selected field is the anchor. Directions use PDF page coordinates.").font(.system(size: 11)).foregroundStyle(.secondary)
+            ScrollView {
+                VStack(alignment: .leading) {
+                    ForEach(fields.indices,id: \.self) { index in
+                        Toggle((fields[index].fieldName ?? "Field")+" #\(index+1)",isOn: Binding(get: { selection.indices.contains(index) },set: { if $0 { selection.indices.insert(index) } else { selection.indices.remove(index) } }))
+                    }
+                }.frame(maxWidth: .infinity,alignment: .leading)
+            }
+            Picker(russian ? "Выравнивание" : "Alignment",selection: $selection.mode) {
+                Text(russian ? "Слева" : "Left").tag(1); Text(russian ? "Справа" : "Right").tag(2); Text(russian ? "По центру X" : "Center X").tag(3)
+                Text(russian ? "Сверху" : "Top").tag(4); Text(russian ? "Снизу" : "Bottom").tag(5); Text(russian ? "По центру Y" : "Center Y").tag(6)
+            }
+            HStack {
+                Button(russian ? "Выбрать все" : "Select all") { selection.indices = Set(fields.indices) }
+                Spacer()
+                Button(russian ? "Отмена" : "Cancel") { close() }
+                Button(russian ? "Применить" : "Apply") { commit(selection.indices.sorted(),selection.mode); close() }.disabled(selection.indices.count < 2)
+            }
+        }.padding(20).frame(width: 490,height: 420)
+    }
+}
+
+@MainActor
+private final class ToolDialogPool: NSObject,NSWindowDelegate {
+    static let shared = ToolDialogPool()
+    private var windows: [NSWindow] = []
+    func show<Content: View>(_ title: String,content: (@escaping () -> Void) -> Content) {
+        let panel = NSPanel(contentRect: CGRect(x: 0,y: 0,width: 500,height: 440),styleMask: [.titled,.closable,.resizable],backing: .buffered,defer: false)
+        panel.title = title; panel.isReleasedWhenClosed = false; panel.delegate = self
+        panel.contentView = NSHostingView(rootView: content { [weak panel] in DispatchQueue.main.async { panel?.close() } })
+        windows.append(panel); panel.center(); panel.makeKeyAndOrderFront(nil)
+    }
+    func windowWillClose(_ notification: Notification) {
+        guard let window = notification.object as? NSWindow else { return }
+        DispatchQueue.main.async { [weak self] in self?.windows.removeAll { $0 === window } }
+    }
+}
+
+@MainActor
+private extension PDFViewer.Coordinator {
+    func cropMargins(item: PDFDocumentItem,view: PDFViewerView) {
+        PDFDialogs.prompt(manager.language == .ru ? "Поля страницы, pt (от MediaBox)" : "Page margins, pt (from MediaBox)",fields: [("Left / Слева","18"),("Right / Справа","18"),("Top / Сверху","18"),("Bottom / Снизу","18"),("Pages / Страницы",String(item.pageIndex+1))]) { [weak self,weak view] values in
+            guard let self,let view,view.document === item.document else { return }
+            guard let indices = PDFPageRange.parse(values[4],count: item.pageCount),let left = Double(values[0]),let right = Double(values[1]),let top = Double(values[2]),let bottom = Double(values[3]) else { self.manager.say("Invalid values or page range.","Некорректные значения или диапазон страниц."); return }
+            // Validate before taking an expensive Undo snapshot or changing any page.
+            let valid = [left,right,top,bottom].allSatisfy { $0.isFinite && $0 >= 0 } && indices.allSatisfy {
+                guard let page = item.document.page(at: $0) else { return false }; let media = page.bounds(for: .mediaBox)
+                return media.width-left-right > 1 && media.height-top-bottom > 1
+            }
+            guard valid else { self.manager.say("Margins exceed page dimensions.","Отступы превышают размеры страницы."); return }
+            self.manager.recordUndo(item,group: "margins")
+            guard PDFPageOperations.crop(item.document,indices: indices,left: left,right: right,top: top,bottom: bottom) else { return }
+            self.reload(view,document: item,pageIndex: item.pageIndex); self.manager.send(.refresh)
+        }
+    }
+    func replacePages(item: PDFDocumentItem,view: PDFViewerView) {
+        PDFDialogs.open([.pdf]) { [weak self,weak view] urls in
+            guard let self,let view,let url = urls.first else { return }
+            let lease = FileAccessLease(url)
+            guard let document = PDFDocument(url: url),document.pageCount > 0 else { self.manager.say("Cannot open source PDF.","Не удалось открыть исходный PDF."); return }
+            AnnotationMetadata.restore(document)
+            PDFDialogs.prompt(self.manager.language == .ru ? "Замена страниц: старые аннотации заменяются; ссылки на неимпортированные страницы источника удаляются" : "Replace pages: old annotations are replaced; source links outside the imported range are removed",fields: [("Target pages / Заменить страницы",String(item.pageIndex+1)),("Source pages / Взять страницы","1")]) { [weak self,weak view] values in
+                _ = lease
+                guard let self,let view,view.document === item.document else { return }
+                guard let targets = PDFPageRange.parse(values[0],count: item.pageCount),let sources = PDFPageRange.parse(values[1],count: document.pageCount),targets.count == sources.count else { self.manager.say("Select equal page counts in both PDFs.","Выберите одинаковое число страниц в обоих PDF."); return }
+                self.manager.recordUndo(item,group: "replacePages")
+                guard PDFPageOperations.replace(item.document,targets: targets,source: document,sources: sources) else { self.manager.say("Page replacement failed.","Не удалось заменить страницы."); return }
+                self.reload(view,document: item,pageIndex: targets[0]); self.manager.send(.refresh)
+            }
+        }
+    }
+    func alignFields(item: PDFDocumentItem,view: PDFViewerView) {
+        guard let page = view.currentPage else { return }
+        let fields = page.annotations.filter { $0.type == "Widget" }
+        guard fields.count >= 2 else { manager.say("At least two form fields are required on the page.","На странице должно быть не меньше двух полей формы."); return }
+        let expectedDocument = item.document
+        ToolDialogPool.shared.show(manager.language == .ru ? "Выравнивание полей" : "Align fields") { close in
+            FieldAlignmentDialog(fields: fields,russian: manager.language == .ru,commit: { [weak self,weak view] indices,mode in
+                guard let self,let view,item.document === expectedDocument,view.document === expectedDocument else { return }
+                self.manager.recordUndo(item,group: "alignFields"); PDFPageOperations.align(indices.map { fields[$0] },mode: mode)
+                view.setNeedsDisplay(view.bounds); self.manager.send(.refresh)
+            },close: close)
+        }
+    }
+    func emailPDF(item: PDFDocumentItem,view: PDFViewerView,currentPage: Bool) {
+        do {
+            let export = PDFDocument()
+            let indices = currentPage ? [item.pageIndex] : Array(0..<item.pageCount)
+            for index in indices { if let source = item.document.page(at: index),let copy = source.copy() as? PDFPage { AnnotationMetadata.copy(from: source,to: copy); export.insert(copy,at: export.pageCount) } }
+            let directory = FileManager.default.temporaryDirectory.appendingPathComponent("BotPlus-Mail-"+UUID().uuidString,isDirectory: true)
+            try FileManager.default.createDirectory(at: directory,withIntermediateDirectories: true)
+            let url = directory.appendingPathComponent(currentPage ? "Page-\(item.pageIndex+1).pdf" : item.filename)
+            if currentPage { try PDFDocumentSerializer.save(export,to: url) }
+            else { try PDFDocumentSerializer.write(try manager.serializedData(item),to: url) }
+            guard let service = NSSharingService(named: .composeEmail),service.canPerform(withItems: [url]) else {
+                // A picker supports the installed mail/share extensions without
+                // sending anything automatically or requiring an account here.
+                let picker = NSSharingServicePicker(items: [url]); picker.show(relativeTo: CGRect(x: view.bounds.midX,y: view.bounds.midY,width: 1,height: 1),of: view,preferredEdge: .minY); return
+            }
+            service.perform(withItems: [url])
+        } catch { manager.say("Could not prepare a PDF attachment.","Не удалось подготовить PDF-вложение.") }
     }
 }

@@ -1,3 +1,6 @@
+// SPDX-License-Identifier: AGPL-3.0-only
+// Copyright (c) 2026 BotPlus
+
 import AppKit
 import CoreText
 import CPDFium
@@ -108,7 +111,7 @@ final class PDFSourceSession {
         let url: URL
         let size: CGFloat
         let color: NSColor
-        var font: CTFont { CTFontCreateWithFontDescriptor(CTFontDescriptorCreateWithAttributes([kCTFontURLAttribute: url] as CFDictionary), size, nil) }
+        @MainActor var font: CTFont { PDFFontCatalog.font(at: url,size: size) }
     }
     private struct BlockInfo { let id: String; let text: String?; let width: CGFloat?; let height: CGFloat? }
     private struct Fragment {
@@ -182,10 +185,19 @@ final class PDFSourceSession {
         let baseline: CGPoint
     }
     private struct Line {
-        var runs: [Positioned]
-        var baseline: CGFloat { runs.map { $0.baseline.y }.reduce(0,+) / CGFloat(runs.count) }
-        var box: CGRect { runs.reduce(CGRect.null) { $0.union($1.box) } }
-        var size: CGFloat { runs.map { $0.fragment.style.size }.max() ?? 12 }
+        let runs: [Positioned]
+        let baseline: CGFloat
+        let box: CGRect
+        let size: CGFloat
+        let startsListItem: Bool
+        init(runs: [Positioned]) {
+            self.runs = runs
+            baseline = runs.reduce(0) { $0+$1.baseline.y } / CGFloat(max(1,runs.count))
+            box = runs.reduce(CGRect.null) { $0.union($1.box) }
+            size = runs.map { $0.fragment.style.size }.max() ?? 12
+            let text = runs.map { $0.fragment.text }.joined().trimmingCharacters(in: .whitespaces)
+            startsListItem = text.range(of: #"^([•\-–—]|\d+[\).])"#,options: .regularExpression) != nil
+        }
     }
     let snapshot: Snapshot
     private let handle: PDFiumDocumentHandle
@@ -198,16 +210,37 @@ final class PDFSourceSession {
     private(set) var resultingBounds: CGRect?
     private(set) var resultingPoint: CGPoint?
     private static let identity = FS_MATRIX(a: 1,b: 0,c: 0,d: 1,e: 0,f: 0)
+    private struct ParsedPage {
+        let data: Data
+        let index: Int
+        let handle: PDFiumDocumentHandle
+        let fragments: [Fragment]
+    }
+    private static var parsedPage: ParsedPage?
+
+    private static func parsed(data: Data,index: Int,takeOwnership: Bool) throws -> ParsedPage {
+        if let cached = parsedPage,cached.index == index,cached.data == data {
+            if takeOwnership { parsedPage = nil }
+            return cached
+        }
+        parsedPage = nil
+        let handle = try PDFiumDocumentHandle(data: data,pageIndex: index)
+        let result = ParsedPage(data: data,index: index,handle: handle,fragments: collectPage(handle))
+        // A session takes exclusive ownership before it can mutate PDFium.
+        // Never retain an unbounded catalog or share a mutable editing handle.
+        if !takeOwnership && data.count <= 64*1024*1024 && result.fragments.count <= 50_000 { parsedPage = result }
+        return result
+    }
 
     @MainActor static func editing(data: Data, pageIndex: Int, point: CGPoint) throws -> PDFSourceSession {
-        let handle = try PDFiumDocumentHandle(data: data,pageIndex: pageIndex)
-        let all = collectPage(handle)
+        let parsed = try parsed(data: data,index: pageIndex,takeOwnership: true)
+        let handle = parsed.handle,all = parsed.fragments
         guard let seed = all.reversed().first(where: { $0.bounds.insetBy(dx: -3,dy: -3).contains(point) }) else { throw PDFSourceError.textNotFound }
         return try makeSession(handle: handle,all: all,seed: seed,point: point)
     }
     static func blocks(data: Data,pageIndex: Int) throws -> [BlockDescriptor] {
-        let handle = try PDFiumDocumentHandle(data: data,pageIndex: pageIndex)
-        let all = collectPage(handle)
+        let parsed = try parsed(data: data,index: pageIndex,takeOwnership: false)
+        let handle = parsed.handle,all = parsed.fragments
         var consumed = Set<UInt>(), result: [BlockDescriptor] = []
         var groups: [String:[Fragment]] = [:]
         for fragment in all {
@@ -278,13 +311,13 @@ final class PDFSourceSession {
         var chosen = seed.block == nil ? Set([selected]) : Set(lines.indices)
         func adjacent(_ a: Line, _ b: Line) -> Bool {
             let gap = abs(a.baseline-b.baseline), size = max(a.size,b.size)
-            guard abs(a.size-b.size) <= size*0.12 else { return false }
+            guard gap >= size*0.75 && gap <= size*1.65,
+                  abs(a.size-b.size) <= size*0.12,
+                  abs(a.box.minX-b.box.minX) <= size*0.75 else { return false }
             let lower = a.baseline < b.baseline ? a : b
-            let lowerText = lower.runs.map { $0.fragment.text }.joined().trimmingCharacters(in: .whitespaces)
-            if lowerText.range(of: #"^([•\-–—]|\d+[\).])"#,options: .regularExpression) != nil { return false }
-            let aligned = abs(a.box.minX-b.box.minX) <= size*0.75
+            if lower.startsListItem { return false }
             let overlap = min(a.box.maxX,b.box.maxX)-max(a.box.minX,b.box.minX)
-            return gap >= size*0.75 && gap <= size*1.65 && aligned && overlap >= min(a.box.width,b.box.width)*0.6
+            return overlap >= min(a.box.width,b.box.width)*0.6
         }
         // Walk only nearest aligned lines above/below, not every nearby object.
         var changed = true
@@ -1005,6 +1038,15 @@ private enum PDFContentNormalizer {
 /// Unusable PDF subsets are listed but never silently chosen as another font.
 @MainActor
 enum PDFFontCatalog {
+    private struct FontKey: Hashable { let url: URL; let size: CGFloat }
+    private static var faceCache: [FontKey:CTFont] = [:]
+    static func font(at url: URL,size: CGFloat) -> CTFont {
+        let key = FontKey(url: url,size: size)
+        if let cached = faceCache[key] { return cached }
+        let font = CTFontCreateWithFontDescriptor(CTFontDescriptorCreateWithAttributes([kCTFontURLAttribute: url] as CFDictionary),size,nil)
+        if faceCache.count >= 128 { faceCache.removeAll(keepingCapacity: true) }
+        faceCache[key] = font; return font
+    }
     private static var embedded: [String: URL] = [:]
     private static var programs: [String: URL] = [:]
     private static var directory: URL = FileManager.default.temporaryDirectory.appendingPathComponent("BotPlusFonts-"+UUID().uuidString,isDirectory: true)

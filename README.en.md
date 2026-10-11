@@ -1,6 +1,7 @@
 # BotPlus PDF Editor
 
 [![macOS 14+](https://img.shields.io/badge/macOS-14%2B-000000?logo=apple)](https://www.apple.com/macos/)
+[![AGPL-3.0](https://img.shields.io/badge/license-AGPL--3.0-blue)](LICENSE)
 [![Swift 6](https://img.shields.io/badge/Swift-6-F05138?logo=swift&logoColor=white)](https://www.swift.org/)
 [![PDFium](https://img.shields.io/badge/PDFium-8086-326CE5)](https://pdfium.googlesource.com/pdfium/)
 [![Apple Silicon](https://img.shields.io/badge/Apple%20Silicon-native-777777?logo=apple)](https://developer.apple.com/)
@@ -9,6 +10,8 @@ A native macOS PDF workspace built with SwiftUI, AppKit, and Apple PDFKit. Its r
 
 ## Features
 
+- Start screen with Open PDF, Create Blank, and ten persisted recent files including path, byte size and last-opened date.
+- GitHub release checking, system email composition, current-page form alignment, page replacement, and independent page margins with Undo.
 - Dark, light, and system themes, selected under Help → UI Settings → Theme.
 - Windows-style ribbon with 13 localized tabs, grouped commands, and a 40 pt quick-access/title/search row drawn into the transparent native titlebar area beside the macOS traffic lights.
 - PDFKit viewport with PDF opening, drag and drop, continuous/single/two-page display, hand and text selection, page navigation, zoom, rotation, and guarded printing.
@@ -26,7 +29,7 @@ Commands without implemented PDF behavior show a localized development notice. T
 ## Technology
 
 - macOS 14 or later; Swift 6; Xcode 16 or later recommended.
-- Apple Silicon is the primary target. The project uses only Apple SDK frameworks: SwiftUI, AppKit, PDFKit, and UniformTypeIdentifiers.
+- Universal arm64/x86_64 release. UI uses Apple SDK frameworks including SwiftUI, AppKit, PDFKit, CoreText and UniformTypeIdentifiers; PDFium is the embedded source-editing dependency.
 - PDFium 157.0.8086.0 is embedded for original PDF text editing; no separate installation is required. The pinned universal arm64/x86_64 library, headers, and notices are in `Vendor/PDFium`.
 - App Sandbox is enabled with user-selected PDF read/write access. Signing and notarization identities are configured in Xcode for your distribution account.
 
@@ -126,7 +129,7 @@ The script sets `origin` to `https://github.com/Davud77/BotPlus-PDF-Editor.git` 
 
 ## License
 
-No license has been selected yet. Add a `LICENSE` file before distributing source code publicly.
+First-party source is licensed under **GNU AGPL v3.0 (AGPL-3.0-only)**; see [LICENSE](LICENSE). Help → License shows the bundled terms. PDFium components retain their individual licenses.
 
 PDFium component notices are included in the app and listed in [THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md).
 
@@ -139,3 +142,9 @@ The inspector shows document properties until text, an image, a vector object or
 The Release application and PDFium dylib contain both arm64 and x86_64 slices. CI runs native persistence checks on Apple Silicon and Intel. Implemented tools include colored/transparent highlight, underline and strikeout; editable text stamps, notes and URL/page links; rectangle, ellipse, cloud, pencil and whole-annotation eraser; PDF image content insertion; basic AcroForm fields and JSON data; bookmark tree operations, batch changes, TOC and HTML/text export; page import/extract/split/swap/crop; editable watermark/header/Bates annotations; PNG export, file merging, read-aloud and word count. Thumbnail size controls switch between a grid and one page per panel width. Dock widths stay constant between panels. Undo/Redo uses bounded document history and preserves bookmark targets. Advanced named-destination editing, calibrated measurements, OCR, cryptographic signatures, office conversion and external integrations remain under development.
 
 Version 1.1 supports thumbnail pinch gestures and Ctrl/Command+wheel zoom. A bounded raster cache and guarded PDFView updates reduce repeated rendering during panel gestures.
+
+## Performance checks (1.2)
+
+Run `BOTPLUS_BENCH_PDF="/absolute/path/document.pdf" BOTPLUS_BENCH_PAGES="1,3" BOTPLUS_BENCH_REPORT="$PWD/performance.json" ./Tools/verify_native.sh`. Add `BOTPLUS_CHECK_OPTIMIZATION=-O` for optimized diagnostics. The report contains timings and counts, with no extracted text or source filename; the input PDF stays read-only and temporary copies are removed.
+
+Opening reads file bytes asynchronously in the application. Unchanged source bytes and Undo snapshots share a bounded cache; native form changes invalidate it. Cached line geometry reduces block clustering work and the editor takes exclusive ownership of the parsed page. Loaded PDFs retain original streams while page identities/order, outlines and attributes stay unchanged. Reassembled documents use a separate page graph; this conservative path can still take seconds. See [PERFORMANCE.md](PERFORMANCE.md).

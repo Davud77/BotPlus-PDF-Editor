@@ -1,5 +1,7 @@
 # Third-party notices
 
+First-party BotPlus PDF Editor code is licensed under AGPL-3.0-only (see LICENSE). The third-party code and notices below retain their own terms.
+
 BotPlus PDF Editor uses PDFium for editing original PDF text content. The pinned arm64 library is distributed by bblanchon/pdfium-binaries (chromium/8086); the upstream project is https://pdfium.googlesource.com/pdfium/.
 
 The full PDFium and bundled component license notices are retained in Vendor/PDFium/licenses and included in the application resources. PDFium is built without V8. See Vendor/PDFium/UPSTREAM.md for provenance and the original archive checksum.

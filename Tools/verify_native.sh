@@ -22,6 +22,7 @@ clang -target "$(uname -m)-apple-macos14.0" -I "$PROJECT_ROOT/Vendor/PDFium/incl
 SWIFT_MODULE_CACHE_PATH="$CHECK_DIRECTORY/Modules" \
 CLANG_MODULE_CACHE_PATH="$CHECK_DIRECTORY/ClangModules" \
 swiftc -swift-version 6 -parse-as-library -target "$(uname -m)-apple-macos14.0" \
+  "${BOTPLUS_CHECK_OPTIMIZATION:--Onone}" \
   -module-cache-path "$CHECK_DIRECTORY/Modules" \
   -I "$PROJECT_ROOT/Native/PDFiumBridge/include" -Xcc -I"$PROJECT_ROOT/Vendor/PDFium/include" \
   -L "$PROJECT_ROOT/Vendor/PDFium/lib" -lpdfium -Xlinker -rpath -Xlinker "$PROJECT_ROOT/Vendor/PDFium/lib" \
