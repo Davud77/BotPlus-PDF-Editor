@@ -437,6 +437,14 @@ final class PDFSourceSession {
         let kind: String
         let bounds: CGRect
         let pixelSize: CGSize?
+        var index: Int = -1
+        var stroke: NSColor? = nil
+        var fill: NSColor? = nil
+        var lineWidth: CGFloat = 1
+        var opacity: CGFloat = 1
+        var strokeEnabled = false
+        var fillEnabled = false
+        var fillRule: Int32 = 0
     }
     static func objectInfo(data: Data,pageIndex: Int,point: CGPoint) throws -> ContentObject? {
         let handle = try PDFiumDocumentHandle(data: data,pageIndex: pageIndex)
@@ -1249,5 +1257,229 @@ enum PDFSourceTextReader {
                 return String(scalars)
             }
         }
+    }
+}
+
+/// A source-object transaction: the viewer is untouched until GenerateContent
+/// and complete serialization succeed. Form XObjects are edited as groups, so
+/// changing one invocation cannot rewrite another invocation's child resources.
+@MainActor
+final class PDFContentSession {
+    struct Style {
+        var stroke: NSColor
+        var fill: NSColor
+        var width: CGFloat
+        var opacity: CGFloat
+        var strokeEnabled: Bool
+        var fillEnabled: Bool
+        var editStroke = true
+        var editFill = true
+        var editOpacity = true
+    }
+    struct Clipboard: Codable {
+        let pdf: Data
+        let bounds: CGRect
+    }
+    let data: Data
+    let pageIndex: Int
+    private let handle: PDFiumDocumentHandle
+    private var used = false
+    private var catalog: [PDFSourceSession.ContentObject]?
+    private(set) var result: PDFSourceSession.ContentObject?
+    private static let identity = FS_MATRIX(a: 1,b: 0,c: 0,d: 1,e: 0,f: 0)
+    init(data: Data,pageIndex: Int) throws {
+        self.data = data; self.pageIndex = pageIndex
+        handle = try PDFiumDocumentHandle(data: data,pageIndex: pageIndex)
+    }
+    var objects: [PDFSourceSession.ContentObject] {
+        if let catalog { return catalog }
+        let objects = (0..<max(0,FPDFPage_CountObjects(handle.page))).compactMap { info(Int($0)) }
+        catalog = objects; return objects
+    }
+    private func object(_ index: Int) -> FPDF_PAGEOBJECT? {
+        guard index >= 0,index < Int(FPDFPage_CountObjects(handle.page)) else { return nil }
+        return FPDFPage_GetObject(handle.page,Int32(index))
+    }
+    func info(_ index: Int) -> PDFSourceSession.ContentObject? {
+        guard let object = object(index) else { return nil }
+        let kind: String
+        switch FPDFPageObj_GetType(object) {
+        case FPDF_PAGEOBJ_IMAGE: kind = "image"
+        case FPDF_PAGEOBJ_PATH: kind = "path"
+        case FPDF_PAGEOBJ_FORM: kind = "group"
+        case FPDF_PAGEOBJ_SHADING: kind = "shading"
+        case FPDF_PAGEOBJ_TEXT:
+            let mode = FPDFTextObj_GetTextRenderMode(object)
+            guard mode == FPDF_TEXTRENDERMODE_FILL || mode == FPDF_TEXTRENDERMODE_STROKE || mode == FPDF_TEXTRENDERMODE_FILL_STROKE else { return nil }
+            kind = "text"
+        default: return nil
+        }
+        var l: Float = 0,b: Float = 0,r: Float = 0,t: Float = 0
+        guard FPDFPageObj_GetBounds(object,&l,&b,&r,&t) != 0,
+              [l,b,r,t].allSatisfy({ $0.isFinite && abs($0) < 1_000_000_000 }) else { return nil }
+        let bounds = CGRect(x: Double(l),y: Double(b),width: max(0.1,Double(r-l)),height: max(0.1,Double(t-b)))
+        func color(_ stroke: Bool) -> NSColor? {
+            var r: UInt32 = 0,g: UInt32 = 0,b: UInt32 = 0,a: UInt32 = 0
+            let ok = stroke ? FPDFPageObj_GetStrokeColor(object,&r,&g,&b,&a) : FPDFPageObj_GetFillColor(object,&r,&g,&b,&a)
+            guard ok != 0 else { return nil }
+            return NSColor(calibratedRed: CGFloat(r)/255,green: CGFloat(g)/255,blue: CGFloat(b)/255,alpha: CGFloat(a)/255)
+        }
+        var fillMode: Int32 = 0,stroke: FPDF_BOOL = 0,width: Float = 1
+        _ = FPDFPageObj_GetStrokeWidth(object,&width)
+        if kind == "path" { _ = FPDFPath_GetDrawMode(object,&fillMode,&stroke) }
+        var pixels: CGSize?
+        if kind == "image" {
+            var w: UInt32 = 0,h: UInt32 = 0
+            if FPDFImageObj_GetImagePixelSize(object,&w,&h) != 0 { pixels = CGSize(width: Int(w),height: Int(h)) }
+        }
+        let strokeColor = color(true),fillColor = color(false)
+        return PDFSourceSession.ContentObject(kind: kind,bounds: bounds,pixelSize: pixels,index: index,stroke: strokeColor,fill: fillColor,lineWidth: CGFloat(width),opacity: (fillMode != 0 || kind == "text" || kind == "image") ? (fillColor?.alphaComponent ?? 1) : (strokeColor?.alphaComponent ?? 1),strokeEnabled: stroke != 0,fillEnabled: kind == "text" || fillMode != 0,fillRule: fillMode)
+    }
+    func select(at point: CGPoint,tolerance: CGFloat) -> PDFSourceSession.ContentObject? {
+        for info in objects.reversed() where info.bounds.insetBy(dx: -tolerance,dy: -tolerance).contains(point) {
+            guard let object = object(info.index) else { continue }
+            if info.kind != "path" { return info }
+            guard let path = path(object) else { continue }
+            var fillMode: Int32 = 0,stroke: FPDF_BOOL = 0
+            _ = FPDFPath_GetDrawMode(object,&fillMode,&stroke)
+            if fillMode != 0 && path.contains(point,using: fillMode == FPDF_FILLMODE_ALTERNATE ? .evenOdd : .winding) { return info }
+            if stroke != 0 {
+                var matrix = Self.identity; _ = FPDFPageObj_GetMatrix(object,&matrix)
+                let scale = max(hypot(CGFloat(matrix.a),CGFloat(matrix.b)),hypot(CGFloat(matrix.c),CGFloat(matrix.d)))
+                let outline = path.copy(strokingWithWidth: max(2*tolerance,info.lineWidth*scale),lineCap: .round,lineJoin: .round,miterLimit: 10)
+                if outline.contains(point) { return info }
+            }
+        }
+        return nil
+    }
+    private func path(_ object: FPDF_PAGEOBJECT) -> CGPath? {
+        var matrix = Self.identity; guard FPDFPageObj_GetMatrix(object,&matrix) != 0 else { return nil }
+        var affine = CGAffineTransform(a: CGFloat(matrix.a),b: CGFloat(matrix.b),c: CGFloat(matrix.c),d: CGFloat(matrix.d),tx: CGFloat(matrix.e),ty: CGFloat(matrix.f))
+        let path = CGMutablePath(),count = max(0,FPDFPath_CountSegments(object))
+        func segment(_ index: Int32) -> (CGPoint,Int32,Bool)? {
+            guard let segment = FPDFPath_GetPathSegment(object,index) else { return nil }
+            var x: Float = 0,y: Float = 0
+            guard FPDFPathSegment_GetPoint(segment,&x,&y) != 0 else { return nil }
+            return (CGPoint(x: Double(x),y: Double(y)),FPDFPathSegment_GetType(segment),FPDFPathSegment_GetClose(segment) != 0)
+        }
+        var index: Int32 = 0
+        while index < count {
+            guard let s = segment(index) else { return nil }
+            if s.1 == FPDF_SEGMENT_MOVETO { path.move(to: s.0) }
+            else if s.1 == FPDF_SEGMENT_LINETO { path.addLine(to: s.0) }
+            else if s.1 == FPDF_SEGMENT_BEZIERTO,let second = segment(index+1),let third = segment(index+2),index+2 < count {
+                path.addCurve(to: third.0,control1: s.0,control2: second.0)
+                if third.2 { path.closeSubpath() }; index += 3; continue
+            } else { return nil }
+            if s.2 { path.closeSubpath() }; index += 1
+        }
+        return path.copy(using: &affine)
+    }
+    func applying(index: Int,bounds target: CGRect,rotation: CGFloat,style: Style? = nil,image: CGImage? = nil,delete: Bool = false) throws -> Data {
+        guard !used,let object = object(index),let original = info(index) else { throw PDFSourceError.alreadyUsed }
+        let values = [target.minX,target.minY,target.width,target.height,rotation]
+        guard values.allSatisfy({ $0.isFinite && abs($0) < 1_000_000 }),target.width >= 0.1,target.height >= 0.1 else { throw PDFSourceError.content }
+        used = true; handle.closeTextPage()
+        if delete {
+            guard FPDFPage_RemoveObject(handle.page,object) != 0 else { throw PDFSourceError.content }
+            FPDFPageObj_Destroy(object)
+        } else {
+            let sx = target.width/original.bounds.width,sy = target.height/original.bounds.height
+            let fit = CGAffineTransform(a: sx,b: 0,c: 0,d: sy,tx: target.minX-sx*original.bounds.minX,ty: target.minY-sy*original.bounds.minY)
+            let c = cos(rotation),s = sin(rotation),center = CGPoint(x: target.midX,y: target.midY)
+            let turn = CGAffineTransform(a: c,b: s,c: -s,d: c,tx: center.x-c*center.x+s*center.y,ty: center.y-s*center.x-c*center.y)
+            let transform = fit.concatenating(turn)
+            let matrix = FS_MATRIX(a: Float(transform.a),b: Float(transform.b),c: Float(transform.c),d: Float(transform.d),e: Float(transform.tx),f: Float(transform.ty))
+            var mutableMatrix = matrix
+            guard FPDFPageObj_TransformF(object,&mutableMatrix) != 0 else { throw PDFSourceError.content }
+            if let style {
+                guard style.width.isFinite,style.width >= 0,style.width <= 2000,style.opacity.isFinite,style.opacity >= 0,style.opacity <= 1 else { throw PDFSourceError.content }
+                func rgba(_ color: NSColor) -> [UInt32] {
+                    let rgb = color.usingColorSpace(.deviceRGB) ?? .black
+                    return [rgb.redComponent,rgb.greenComponent,rgb.blueComponent,style.opacity].map { UInt32((min(1,max(0,$0))*255).rounded()) }
+                }
+                let fill = rgba(style.fill),stroke = rgba(style.stroke)
+                if (original.kind == "path" || original.kind == "text" || original.kind == "image") && (style.editFill || (style.editOpacity && (original.fill != nil || original.kind == "image"))) {
+                    guard FPDFPageObj_SetFillColor(object,fill[0],fill[1],fill[2],fill[3]) != 0 else { throw PDFSourceError.content }
+                }
+                if original.kind == "path" {
+                    guard style.strokeEnabled || style.fillEnabled else { throw PDFSourceError.content }
+                    if style.editStroke || (style.editOpacity && original.stroke != nil) { guard FPDFPageObj_SetStrokeColor(object,stroke[0],stroke[1],stroke[2],stroke[3]) != 0 else { throw PDFSourceError.content } }
+                    guard FPDFPageObj_SetStrokeWidth(object,Float(style.width)) != 0,
+                          FPDFPath_SetDrawMode(object,style.fillEnabled ? (original.fillRule == FPDF_FILLMODE_ALTERNATE ? FPDF_FILLMODE_ALTERNATE : FPDF_FILLMODE_WINDING) : FPDF_FILLMODE_NONE,style.strokeEnabled ? 1 : 0) != 0 else { throw PDFSourceError.content }
+                }
+            }
+            if let image { guard original.kind == "image" else { throw PDFSourceError.content }; try replaceImage(image,object: object) }
+            result = info(index)
+        }
+        guard FPDFPage_GenerateContent(handle.page) != 0 else { throw PDFSourceError.content }
+        return try serialized()
+    }
+    private func replaceImage(_ image: CGImage,object: FPDF_PAGEOBJECT) throws {
+        let factor = min(1,4096/Double(max(image.width,image.height)))
+        let width = max(1,Int(Double(image.width)*factor)),height = max(1,Int(Double(image.height)*factor))
+        guard let bitmap = FPDFBitmap_CreateEx(Int32(width),Int32(height),FPDFBitmap_BGRA,nil,0) else { throw PDFSourceError.content }
+        defer { FPDFBitmap_Destroy(bitmap) }
+        guard let memory = FPDFBitmap_GetBuffer(bitmap),let context = CGContext(data: memory,width: width,height: height,bitsPerComponent: 8,bytesPerRow: Int(FPDFBitmap_GetStride(bitmap)),space: CGColorSpaceCreateDeviceRGB(),bitmapInfo: CGImageAlphaInfo.premultipliedFirst.rawValue|CGBitmapInfo.byteOrder32Little.rawValue) else { throw PDFSourceError.content }
+        context.clear(CGRect(x: 0,y: 0,width: width,height: height))
+        context.translateBy(x: 0,y: CGFloat(height)); context.scaleBy(x: 1,y: -1); context.draw(image,in: CGRect(x: 0,y: 0,width: width,height: height))
+        let pixels = memory.assumingMemoryBound(to: UInt8.self),stride = Int(FPDFBitmap_GetStride(bitmap))
+        for row in 0..<height { for column in 0..<width {
+            let offset = row*stride+column*4,alpha = Int(pixels[offset+3])
+            if alpha > 0 && alpha < 255 { for channel in 0..<3 { pixels[offset+channel] = UInt8(min(255,Int(pixels[offset+channel])*255/alpha)) } }
+        } }
+        var page: FPDF_PAGE? = handle.page
+        guard FPDFImageObj_SetBitmap(&page,1,object,bitmap) != 0 else { throw PDFSourceError.content }
+    }
+    func clipboard(index: Int) throws -> Clipboard {
+        guard let info = info(index) else { throw PDFSourceError.content }
+        let copy = try PDFContentSession(data: data,pageIndex: pageIndex)
+        copy.handle.closeTextPage()
+        for i in 0..<max(0,FPDFPage_CountObjects(copy.handle.page)) where Int(i) != index {
+            if let object = FPDFPage_GetObject(copy.handle.page,i) { guard FPDFPageObj_SetIsActive(object,0) != 0 else { throw PDFSourceError.content } }
+        }
+        for i in (0..<max(0,FPDFPage_GetAnnotCount(copy.handle.page))).reversed() { _ = FPDFPage_RemoveAnnot(copy.handle.page,i) }
+        FPDFPage_SetRotation(copy.handle.page,0)
+        FPDFPage_SetCropBox(copy.handle.page,Float(info.bounds.minX),Float(info.bounds.minY),Float(info.bounds.maxX),Float(info.bounds.maxY))
+        FPDFPage_SetMediaBox(copy.handle.page,Float(info.bounds.minX),Float(info.bounds.minY),Float(info.bounds.maxX),Float(info.bounds.maxY))
+        guard FPDFPage_GenerateContent(copy.handle.page) != 0,let target = FPDF_CreateNewDocument() else { throw PDFSourceError.content }
+        defer { FPDF_CloseDocument(target) }
+        var index = Int32(pageIndex)
+        guard FPDF_ImportPagesByIndex(target,copy.handle.document,&index,1,0) != 0 else { throw PDFSourceError.content }
+        var count = 0
+        guard let memory = BotPlusPDFium_SaveDocument(target,&count),count > 0,count <= 64*1024*1024 else { throw PDFSourceError.save }
+        defer { BotPlusPDFium_Free(memory) }
+        return Clipboard(pdf: Data(bytes: memory,count: count),bounds: info.bounds)
+    }
+    func pasting(_ clipboard: Clipboard,at point: CGPoint) throws -> Data {
+        guard !used,clipboard.pdf.count <= 64*1024*1024 else { throw PDFSourceError.content }
+        let storage = clipboard.pdf as NSData
+        guard let source = FPDF_LoadMemDocument64(storage.bytes,storage.length,nil) else { throw PDFSourceError.document }
+        defer { FPDF_CloseDocument(source) }
+        guard let template = FPDF_NewXObjectFromPage(handle.document,source,0) else { throw PDFSourceError.content }
+        defer { FPDF_CloseXObject(template) }
+        guard let object = FPDF_NewFormObjectFromXObject(template) else { throw PDFSourceError.content }
+        var initial = Self.identity
+        guard FPDFPageObj_TransformF(object,&initial) != 0 else { FPDFPageObj_Destroy(object); throw PDFSourceError.content }
+        var l: Float = 0,b: Float = 0,r: Float = 0,t: Float = 0
+        guard FPDFPageObj_GetBounds(object,&l,&b,&r,&t) != 0 else { FPDFPageObj_Destroy(object); throw PDFSourceError.content }
+        var matrix = FS_MATRIX(a: 1,b: 0,c: 0,d: 1,e: Float(point.x)-l,f: Float(point.y)-t)
+        guard FPDFPageObj_TransformF(object,&matrix) != 0 else { FPDFPageObj_Destroy(object); throw PDFSourceError.content }
+        used = true; handle.closeTextPage()
+        FPDFPage_InsertObject(handle.page,object)
+        guard FPDFPage_GenerateContent(handle.page) != 0 else { throw PDFSourceError.content }
+        result = info(Int(FPDFPage_CountObjects(handle.page))-1)
+        return try serialized()
+    }
+    private func serialized() throws -> Data {
+        if FPDFPage_CountObjects(handle.page) == 0 {
+            guard let sentinel = FPDFPageObj_CreateNewRect(0,0,0.01,0.01) else { throw PDFSourceError.content }
+            _ = FPDFPageObj_SetFillColor(sentinel,0,0,0,0); _ = FPDFPath_SetDrawMode(sentinel,FPDF_FILLMODE_WINDING,0)
+            FPDFPage_InsertObject(handle.page,sentinel)
+            guard FPDFPage_GenerateContent(handle.page) != 0 else { throw PDFSourceError.content }
+        }
+        var count = 0
+        guard let bytes = BotPlusPDFium_SaveDocument(handle.document,&count),count > 0 else { throw PDFSourceError.save }
+        defer { BotPlusPDFium_Free(bytes) }; return Data(bytes: bytes,count: count)
     }
 }

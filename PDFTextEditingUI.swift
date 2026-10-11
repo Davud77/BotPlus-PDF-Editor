@@ -155,6 +155,10 @@ final class PDFInlineTextEditor: NSObject, NSTextViewDelegate {
     }
     var isAttached: Bool { host.superview != nil }
     func owns(_ view: NSView?) -> Bool { view?.isDescendant(of: host) == true || view === host }
+    func hit(at point: CGPoint) -> NSView? {
+        guard let pdfView,let parent = host.superview else { return nil }
+        return host.hitTest(parent.convert(point,from: pdfView))
+    }
     var attributedText: NSAttributedString { editor.attributedString().copy() as! NSAttributedString }
     var ascent: CGFloat { baselineFromTop }
     private var maximumFontSize: CGFloat {

@@ -8,6 +8,10 @@
 
 A native macOS PDF workspace built with SwiftUI, AppKit, and Apple PDFKit. Its ribbon ergonomics, dockable panels, and drafting-oriented workflows take inspiration from PDF-XChange Editor, with a bilingual Russian and English interface. Ribbon tab widths remain fixed when the active tab changes.
 
+## Start screen
+
+![BotPlus PDF Editor with no open PDF](docs/images/start-screen.png)
+
 ## Features
 
 - Start screen with Open PDF, Create Blank, and ten persisted recent files including path, byte size and last-opened date.
@@ -15,6 +19,9 @@ A native macOS PDF workspace built with SwiftUI, AppKit, and Apple PDFKit. Its r
 - Dark, light, and system themes, selected under Help → UI Settings → Theme.
 - Windows-style ribbon with 13 localized tabs, grouped commands, and a 40 pt quick-access/title/search row drawn into the transparent native titlebar area beside the macOS traffic lights.
 - PDFKit viewport with PDF opening, drag and drop, continuous/single/two-page display, hand and text selection, page navigation, zoom, rotation, and guarded printing.
+- Source content editor for images, paths/fills, text objects and whole PDF form groups; move, resize, rotate, delete, vector clipboard, Undo and image replacement. Shared form children are preserved.
+- Document commands are disabled when no PDF is open; navigation and page deletion respect page boundaries.
+- A consistent 5–2000% zoom range and logarithmic status slider; pointer-owned gestures work while the inspector keeps keyboard focus.
 - Original PDF text block editing with word wrapping, searchable text insertion, and copy/cut/paste/delete commands under Home → Objects.
 - Live free-text annotation editing with font size, color, opacity, and border controls; highlight/underline; rectangle, line, arrow, and grouped callout annotations.
 - Annotation selection, dragging, four-corner resizing, Delete/Backspace removal, and live vector drag previews.

@@ -27,6 +27,7 @@ struct NativeChecks {
         _ = NSApplication.shared
         NSApp.setActivationPolicy(.prohibited)
         try checkRelease12(root: root)
+        try checkContentEditor(root: root)
         if let path = ProcessInfo.processInfo.environment["BOTPLUS_BENCH_PDF"] { try benchmarkRelease12(root: root,path: path) }
 
         let customSymbols: Set<String> = ["botplus.floppy", "botplus.bookmark.plus"]
@@ -806,4 +807,113 @@ private func benchmarkRelease12(root: URL,path: String) throws {
     let reportData = try JSONSerialization.data(withJSONObject: report,options: [.prettyPrinted,.sortedKeys])
     if let reportPath = ProcessInfo.processInfo.environment["BOTPLUS_BENCH_REPORT"] { try reportData.write(to: URL(fileURLWithPath: reportPath)) }
     print("PERF: report complete; source PDF was read only")
+}
+
+@MainActor
+private func checkContentEditor(root: URL) throws {
+    func expect(_ value: @autoclosure () throws -> Bool,_ message: String) rethrows { if try !value() { fatalError("CONTENT CHECK FAILED: "+message) } }
+    _ = PDFiumRuntime.ready
+    let document = FPDF_CreateNewDocument()!,page = FPDFPage_New(document,0,612,792)!
+    let rectangle = FPDFPageObj_CreateNewRect(100,100,90,60)!
+    _ = FPDFPageObj_SetFillColor(rectangle,0,255,0,180); _ = FPDFPageObj_SetStrokeColor(rectangle,255,0,0,255)
+    _ = FPDFPageObj_SetStrokeWidth(rectangle,2); _ = FPDFPath_SetDrawMode(rectangle,FPDF_FILLMODE_WINDING,1)
+    FPDFPage_InsertObject(page,rectangle)
+    let diagonal = FPDFPageObj_CreateNewPath(220,200)!
+    _ = FPDFPath_LineTo(diagonal,320,300); _ = FPDFPageObj_SetStrokeColor(diagonal,0,0,0,255)
+    _ = FPDFPageObj_SetStrokeWidth(diagonal,2); _ = FPDFPath_SetDrawMode(diagonal,FPDF_FILLMODE_NONE,1)
+    FPDFPage_InsertObject(page,diagonal); expect(FPDFPage_GenerateContent(page) != 0,"fixture generation")
+    var size = 0; let pointer = BotPlusPDFium_SaveDocument(document,&size)!
+    let fixture = Data(bytes: pointer,count: size); BotPlusPDFium_Free(pointer); FPDF_ClosePage(page); FPDF_CloseDocument(document)
+    let adding = try PDFSourceSession.adding(data: fixture,pageIndex: 0,point: CGPoint(x: 20,y: 700),fontSize: 14,color: .black)
+    let data = try adding.applying(text: "Untouched",fontSize: 14,color: .black)
+    let session = try PDFContentSession(data: data,pageIndex: 0)
+    let selected = session.select(at: CGPoint(x: 140,y: 130),tolerance: 3)!
+    expect(selected.kind == "path" && selected.fillEnabled,"selects interior of a real filled vector object")
+    expect(session.select(at: CGPoint(x: 270,y: 250),tolerance: 3)?.kind == "path","selects diagonal by path geometry")
+    expect(session.select(at: CGPoint(x: 220,y: 290),tolerance: 3) == nil,"bounding box corner away from a diagonal does not select it")
+    let target = selected.bounds.offsetBy(dx: 30,dy: 40)
+    let style = PDFContentSession.Style(stroke: .blue,fill: .yellow,width: 3,opacity: 0.4,strokeEnabled: true,fillEnabled: true)
+    let edited = try session.applying(index: selected.index,bounds: target,rotation: .pi/2,style: style)
+    let editedSession = try PDFContentSession(data: edited,pageIndex: 0)
+    let changed = editedSession.objects.first { $0.kind == "path" && ($0.fill?.redComponent ?? 0) > 0.9 }!
+    expect(abs(changed.bounds.midX-target.midX) < 0.1 && abs(changed.bounds.midY-target.midY) < 0.1,"rotation/movement preserve the intended center")
+    expect(abs(changed.opacity-0.4) < 0.01 && abs(changed.lineWidth-3) < 0.01,"stroke, color and opacity persist")
+    try expect(try PDFSourceTextReader.pages(data: edited).joined().contains("Untouched"),"unrelated original text survives vector editing")
+    expect(editedSession.objects.filter { $0.kind == "path" }.count == 2,"unrelated paths survive")
+    let clipboard = try editedSession.clipboard(index: changed.index)
+    let pastedSession = try PDFContentSession(data: edited,pageIndex: 0)
+    let pasted = try pastedSession.pasting(clipboard,at: CGPoint(x: 50,y: 500))
+    let pastedInfo = pastedSession.result!
+    expect(pastedInfo.kind == "group" && abs(pastedInfo.bounds.minX-50) < 1 && abs(pastedInfo.bounds.maxY-500) < 1,"vector clipboard paste positions a reusable PDF group")
+    try expect(try PDFSourceTextReader.pages(data: pasted).joined().contains("Untouched"),"paste retains page text")
+    let deleting = try PDFContentSession(data: edited,pageIndex: 0)
+    let deleted = try deleting.applying(index: changed.index,bounds: changed.bounds,rotation: 0,delete: true)
+    try expect(try PDFContentSession(data: deleted,pageIndex: 0).objects.filter { $0.kind == "path" }.count == 1,"delete removes only the selected path")
+    func image(_ color: CGColor,_ width: Int,_ height: Int) -> CGImage {
+        let context = CGContext(data: nil,width: width,height: height,bitsPerComponent: 8,bytesPerRow: width*4,space: CGColorSpaceCreateDeviceRGB(),bitmapInfo: CGImageAlphaInfo.premultipliedLast.rawValue)!
+        context.setFillColor(color); context.fill(CGRect(x: 0,y: 0,width: width,height: height)); return context.makeImage()!
+    }
+    let imageData = try PDFSourceSession.insertingImage(data: edited,pageIndex: 0,image: image(CGColor(red: 1,green: 0,blue: 0,alpha: 1),24,16),bounds: CGRect(x: 400,y: 300,width: 60,height: 40))
+    let imageSession = try PDFContentSession(data: imageData,pageIndex: 0),info = imageSession.objects.first { $0.kind == "image" }!
+    let replaced = try imageSession.applying(index: info.index,bounds: info.bounds,rotation: 0,style: .init(stroke: .black,fill: .black,width: 1,opacity: 0.5,strokeEnabled: false,fillEnabled: true),image: image(CGColor(red: 0,green: 1,blue: 0,alpha: 1),36,12))
+    let replacedInfo = try PDFContentSession(data: replaced,pageIndex: 0).objects.first { $0.kind == "image" }!
+    expect(replacedInfo.pixelSize == CGSize(width: 36,height: 12),"image replacement keeps placement and changes pixel data")
+    expect(abs(replacedInfo.bounds.minX-info.bounds.minX) < 0.01,"image replacement retains its transform")
+    let imageStorage = replaced as NSData
+    let renderDocument = FPDF_LoadMemDocument64(imageStorage.bytes,imageStorage.length,nil)!,renderPage = FPDF_LoadPage(renderDocument,0)!
+    let bitmap = FPDFBitmap_Create(612,792,1)!
+    FPDFBitmap_FillRect(bitmap,0,0,612,792,0xffffffff)
+    FPDF_RenderPageBitmap(bitmap,renderPage,0,0,612,792,0,0)
+    let pixels = FPDFBitmap_GetBuffer(bitmap)!.assumingMemoryBound(to: UInt8.self)
+    let offset = (792-320)*Int(FPDFBitmap_GetStride(bitmap))+430*4
+    expect(pixels[offset+1] > 245 && pixels[offset] > 110 && pixels[offset] < 145 && pixels[offset+2] > 110 && pixels[offset+2] < 145,"image opacity affects rendered pixels rather than only inspector state")
+    FPDFBitmap_Destroy(bitmap); FPDF_ClosePage(renderPage); FPDF_CloseDocument(renderDocument)
+    let pdf = PDFDocument(data: replaced)!
+    let saveURL = root.appendingPathComponent("content-editor.pdf")
+    try PDFDocumentSerializer.save(pdf,to: saveURL)
+    if let destination = ProcessInfo.processInfo.environment["BOTPLUS_GUI_FIXTURE"] { try Data(contentsOf: saveURL).write(to: URL(fileURLWithPath: destination)) }
+    let saved = try PDFContentSession(data: Data(contentsOf: saveURL),pageIndex: 0)
+    expect(saved.objects.contains { $0.kind == "image" },"edited image survives app save/reopen")
+    let defaults = UserDefaults(suiteName: "BotPlusContentChecks")!
+    let manager = DocumentManager(recent: RecentPDFStore(defaults: defaults))
+    for tab in RibbonTab.allCases {
+        for command in RibbonView.groups(for: tab).flatMap(\.commands) {
+            if case .tool = command.action { expect(!manager.canPerform(command.action),"tools are disabled without a document") }
+        }
+    }
+    expect(!manager.canPerform(.save) && !manager.canPerform(.print) && !manager.canPerform(.paste),"document commands are disabled")
+    expect(manager.canPerform(.open) && manager.canPerform(.feature("blank")) && manager.canPerform(.feature("license")),"start/help commands stay available")
+    manager.createBlankDocument()
+    expect(!manager.canPerform(.previous) && !manager.canPerform(.next) && !manager.canPerform(.deletePage),"single page navigation/delete boundaries")
+    expect(manager.canPerform(.tool(.editContent)),"content editor is enabled for a writable document")
+    expect(HoverEventLocation.acceptsWindow(owner: 1,underPointer: 1,modal: nil,hasSheet: false),"pointer ownership accepts a window independent of key-window focus")
+    expect(!HoverEventLocation.acceptsWindow(owner: 1,underPointer: 2,modal: nil,hasSheet: false),"floating panel under pointer blocks a covered viewport")
+    expect(!HoverEventLocation.acceptsWindow(owner: 1,underPointer: 1,modal: 2,hasSheet: false),"modal dialog blocks viewport input")
+    expect(!HoverEventLocation.acceptsWindow(owner: 1,underPointer: 1,modal: nil,hasSheet: true),"attached sheet blocks viewport input")
+    let item = PDFDocumentItem(url: saveURL,document: PDFDocument(data: data)!)
+    manager.insertDocument(item); manager.tool = .editContent
+    let view = PDFViewerView(frame: CGRect(x: 0,y: 0,width: 500,height: 600))
+    let window = NSWindow(contentRect: view.frame,styleMask: [.titled],backing: .buffered,defer: false); window.isReleasedWhenClosed = false; window.contentView = view
+    let coordinator = PDFViewer.Coordinator(manager: manager); coordinator.attach(view); coordinator.update(view)
+    view.layoutDocumentView(); view.layoutSubtreeIfNeeded()
+    func mouse(_ type: NSEvent.EventType,_ point: CGPoint) -> NSEvent {
+        let position = view.convert(view.convert(point,from: item.document.page(at: 0)!),to: nil)
+        return NSEvent.mouseEvent(with: type,location: position,modifierFlags: [],timestamp: 0,windowNumber: window.windowNumber,context: nil,eventNumber: 0,clickCount: 1,pressure: 1)!
+    }
+    view.mouseDown(with: mouse(.leftMouseDown,CGPoint(x: 140,y: 130)))
+    expect(manager.contentProperties.active && manager.selectedContent?.kind == "path","click activates content inspector")
+    view.mouseDragged(with: mouse(.leftMouseDragged,CGPoint(x: 160,y: 145)))
+    view.mouseUp(with: mouse(.leftMouseUp,CGPoint(x: 160,y: 145)))
+    expect(abs(manager.selectedContent!.bounds.midX-(selected.bounds.midX+20)) < 1,"drag commits source-object movement")
+    expect(!item.undoHistory.isEmpty,"content transactions participate in Undo")
+    manager.undoDocument(redo: false)
+    try expect(try PDFContentSession(data: manager.serializedData(item),pageIndex: 0).select(at: CGPoint(x: 140,y: 130),tolerance: 3) != nil,"Undo restores original object geometry")
+    coordinator.update(view)
+    for zoom: CGFloat in [0.05,0.1,1,5,20] {
+        coordinator.checkCommand(.setZoom(zoom),view: view)
+        expect(abs(view.scaleFactor-zoom) < 0.001,"toolbar/slider supports full PDF range")
+        expect(abs(CGFloat(exp(log(Double(PDFZoomLimits.clamp(zoom)))))-zoom) < 0.001,"logarithmic status slider doesn't clamp legal PDF zoom")
+    }
+    coordinator.detach(); view.stopEventMonitoring(); window.close()
+    print("PASS: content paths/images, precise hit testing, transform/style/delete/clipboard, inspector/Undo, command availability and full-range PDF zoom")
 }
