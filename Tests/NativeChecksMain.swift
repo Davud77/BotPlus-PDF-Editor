@@ -18,7 +18,7 @@ extension PDFViewer.Coordinator {
 
 @main
 struct NativeChecks {
-    @MainActor static func main() throws {
+    @MainActor static func main() async throws {
         func expect(_ condition: @autoclosure () -> Bool, _ message: String) {
             if !condition() { fatalError("CHECK FAILED: \(message)") }
         }
@@ -28,6 +28,7 @@ struct NativeChecks {
         NSApp.setActivationPolicy(.prohibited)
         try checkRelease12(root: root)
         try checkContentEditor(root: root)
+        try await checkFormatting(root: root)
         if let path = ProcessInfo.processInfo.environment["BOTPLUS_BENCH_PDF"] { try benchmarkRelease12(root: root,path: path) }
 
         let customSymbols: Set<String> = ["botplus.floppy", "botplus.bookmark.plus"]
@@ -602,9 +603,10 @@ private func runRibbonFeatureChecks(root: URL) throws {
     expect(annotations.contains { $0.fieldName == "Field0" && $0.widgetStringValue == "Filled text" },"persist form input")
     expect(reopened.outlineRoot?.numberOfChildren == 2,"persist outline hierarchy")
     let image = NSImage(size: CGSize(width: 16,height: 16),flipped: false) { rect in NSColor.red.setFill(); NSBezierPath(rect: rect).fill(); return true }
-    let imageData = try PDFSourceSession.insertingImage(data: item.document.dataRepresentation()!,pageIndex: 1,image: image.cgImage(forProposedRect: nil,context: nil,hints: nil)!,bounds: CGRect(x: 80,y: 60,width: 100,height: 100))
+    let imageRef = image.cgImage(forProposedRect: nil,context: nil,hints: nil)!
+    let imageData = try PDFSourceSession.insertingImage(data: item.document.dataRepresentation()!,pageIndex: 1,image: imageRef,bounds: CGRect(x: 80,y: 60,width: 100,height: 100))
     let imageInfo = try PDFSourceSession.objectInfo(data: imageData,pageIndex: 1,point: CGPoint(x: 120,y: 100))
-    expect(imageInfo?.kind == "image" && imageInfo?.pixelSize?.width == 16,"inserted image is a real PDF content object")
+    expect(imageInfo?.kind == "image" && imageInfo?.pixelSize?.width == CGFloat(imageRef.width),"inserted image retains real pixel dimensions independently of Retina backing scale")
     let imageDoc = PDFDocument(data: imageData)!
     expect((imageDoc.page(at: 1)?.string ?? "").contains("Hello annotation"),"image insertion preserves neighboring text")
     expect(imageDoc.dataRepresentation() != nil,"inserted image survives PDFKit persistence")
@@ -916,4 +918,82 @@ private func checkContentEditor(root: URL) throws {
     }
     coordinator.detach(); view.stopEventMonitoring(); window.close()
     print("PASS: content paths/images, precise hit testing, transform/style/delete/clipboard, inspector/Undo, command availability and full-range PDF zoom")
+}
+
+@MainActor
+private func checkFormatting(root: URL) async throws {
+    func expect(_ condition: @autoclosure () -> Bool, _ message: String) {
+        if !condition() { fatalError("FORMAT CHECK FAILED: \(message)") }
+    }
+    let document = PDFDocument()
+    for index in 0..<3 {
+        guard let page = PDFRasterizer.textPage("ORIGINAL \(index + 1)"), let copy = page.copy() as? PDFPage else { fatalError("fixture") }
+        copy.setBounds(CGRect(x: 12, y: 20, width: 588, height: 752), for: .cropBox)
+        if index == 1 { copy.rotation = 90 }
+        document.insert(copy, at: index)
+    }
+    let url = root.appendingPathComponent("formatting.pdf")
+    expect(document.write(to: url), "fixture saves")
+    let manager = DocumentManager(recent: RecentPDFStore(defaults: UserDefaults(suiteName: "BotPlusFormattingChecks")!))
+    manager.open(url)
+    let item = manager.selected!
+    let view = PDFViewerView(frame: CGRect(x: 0, y: 0, width: 800, height: 600))
+    let coordinator = PDFViewer.Coordinator(manager: manager)
+    coordinator.attach(view); coordinator.update(view)
+    var options = PDFFormattingOptions(); options.range = "1,3"
+    options.headerCenter = "{file}"; options.footerCenter = "{page}/{pages}"
+    expect(coordinator.applyFormatting(.header, options: options, remove: false, item: item, view: view) == nil, "headers apply")
+    expect(item.document.page(at: 1)!.annotations.isEmpty, "range leaves rotated page intact")
+    expect(item.document.page(at: 2)!.annotations.contains { $0.contents == "3/3" }, "real page numbers")
+    options.headerCenter = "UPDATED {date}"
+    expect(coordinator.applyFormatting(.header, options: options, remove: false, item: item, view: view) == nil, "headers replace")
+    expect(item.document.page(at: 0)!.annotations.filter { AnnotationMetadata.decoration(of: $0) == "header" }.count == 2, "no duplicate headers")
+    let serialized = try manager.serializedData(item)
+    let reopened = PDFDocument(data: serialized)!
+    AnnotationMetadata.restore(reopened)
+    expect(reopened.page(at: 0)!.annotations.contains { AnnotationMetadata.decoration(of: $0) == "header" }, "decoration tags survive save/reopen")
+    options.text = "BP-{bates}"; options.batesStart = 90; options.batesDigits = 6
+    expect(coordinator.applyFormatting(.bates, options: options, remove: false, item: item, view: view) == nil, "Bates apply")
+    expect(item.document.page(at: 2)!.annotations.contains { $0.contents == "BP-000091" }, "Bates sequence follows selected range")
+    expect(coordinator.applyFormatting(.header, options: options, remove: true, item: item, view: view) == nil, "headers remove")
+    expect(item.document.page(at: 0)!.annotations.allSatisfy { AnnotationMetadata.decoration(of: $0) != "header" }, "only matching decoration removed")
+    expect(item.document.page(at: 0)!.annotations.contains { AnnotationMetadata.decoration(of: $0) == "bates" }, "other decoration remains")
+    options.left = 900
+    let before = item.document.page(at: 0)!.bounds(for: .cropBox)
+    expect(coordinator.applyFormatting(.margins, options: options, remove: false, item: item, view: view) != nil, "invalid margins rejected before mutation")
+    expect(item.document.page(at: 0)!.bounds(for: .cropBox) == before, "invalid margins preserve bounds")
+    let base = try manager.serializedData(item)
+    let oldCount = try PDFContentSession(data: base, pageIndex: 0).objects.count
+    let red = PDFColorComponents(Color.red)
+    let background = try await PDFPageBackgroundEngine.change(data: base, indices: [0, 2], color: red, image: nil, remove: false) { _ in }
+    let first = try PDFContentSession(data: background, pageIndex: 0)
+    expect(first.objects.count == oldCount + 1, "background adds one object")
+    expect(first.objects.first?.kind == "path", "background inserted behind original objects")
+    let replaced = try await PDFPageBackgroundEngine.change(data: background, indices: [0, 2], color: PDFColorComponents(.blue), image: nil, remove: false) { _ in }
+    let replacedCount = try PDFContentSession(data: replaced, pageIndex: 0).objects.count
+    expect(replacedCount == oldCount + 1, "background update preserves mark and replaces old fill")
+    let removed = try await PDFPageBackgroundEngine.change(data: replaced, indices: [0, 2], color: red, image: nil, remove: true) { _ in }
+    let removedCount = try PDFContentSession(data: removed, pageIndex: 0).objects.count
+    expect(removedCount == oldCount, "remove background preserves original objects")
+    let final = PDFDocument(data: removed)!
+    expect(final.page(at: 0)!.string?.contains("ORIGINAL 1") == true, "source text preserved")
+    expect(final.page(at: 1)!.rotation == 90, "other page rotation preserved")
+    for format in PDFImageFormat.allCases {
+        let folder = root.appendingPathComponent("format-" + format.rawValue)
+        let export = PDFImageExportOptions(indices: [0, 1], format: format, dpi: 72, transparent: true, quality: 0.9)
+        let count = try PDFImageExporter.export(data: removed, to: folder, options: export) { _ in }
+        expect(count == 2, "export count")
+        let data = try Data(contentsOf: folder.appendingPathComponent("Page-0002." + format.fileExtension))
+        let bitmap = NSBitmapImageRep(data: data)!
+        expect(bitmap.pixelsWide == 752 && bitmap.pixelsHigh == 588, "rotated CropBox export size")
+    }
+    let tooLarge = root.appendingPathComponent("too-large")
+    do {
+        _ = try PDFImageExporter.export(data: removed, to: tooLarge,
+            options: PDFImageExportOptions(indices: [0], format: .png, dpi: 3000, transparent: false, quality: 1)) { _ in }
+        fatalError("oversized export should fail")
+    } catch PDFImageExportError.tooLarge { }
+    expect(!FileManager.default.fileExists(atPath: tooLarge.path), "failed export removes only its own partial directory")
+    coordinator.detach()
+    print("PASS: decoration templates/ranges/replacement/persistence, margins validation, vector background ordering/update/removal, PNG/JPEG/TIFF export and rotation")
 }

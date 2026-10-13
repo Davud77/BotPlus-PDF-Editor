@@ -10,7 +10,7 @@ import UniformTypeIdentifiers
 
 private enum BotPlusBrand {
     static let name = "BotPlus PDF Editor"
-    static let version = "1.3"
+    static let version = "1.4"
     static let copyright = "© 2026 BotPlus"
     static let supportURL = URL(string: "https://github.com/Davud77/BotPlus-PDF-Editor")!
     static let telegramURL = URL(string: "https://t.me/botplus_pdf")!
@@ -428,6 +428,11 @@ private final class DocumentManager: ObservableObject {
     let panels = PanelWorkspaceModel()
     let recent: RecentPDFStore
     init(recent: RecentPDFStore = .shared) { self.recent = recent }
+    @Published var formattingRequest: PDFFormattingRequest?
+    @Published var operationProgress: Double?
+    @Published var operationTitle = ""
+    var operationTask: Task<Void, Never>?
+    var activeOperationID: UUID?
     @Published var loadingFiles = 0
     private var openingPaths = Set<String>()
     @Published var isLicensePresented = false
@@ -694,6 +699,7 @@ private enum AnnotationMetadata {
         var id = UUID().uuidString
         var opacity: Double
         var group: String?
+        var decoration: String?
     }
     private struct Entry: Codable {
         let index: Int
@@ -710,6 +716,11 @@ private enum AnnotationMetadata {
     static func alpha(of annotation: PDFAnnotation) -> CGFloat {
         if let record = records.object(forKey: annotation)?.record { return CGFloat(record.opacity) }
         return annotation.color.alphaComponent
+    }
+    static func decoration(of annotation: PDFAnnotation) -> String? { records.object(forKey: annotation)?.record.decoration }
+    static func setDecoration(_ kind: String, on annotation: PDFAnnotation) {
+        var record = records.object(forKey: annotation)?.record ?? Record(opacity: 1)
+        record.decoration = kind; records.setObject(Box(record), forKey: annotation)
     }
     static func group(of annotation: PDFAnnotation) -> String? { records.object(forKey: annotation)?.record.group }
     static func setOpacity(_ opacity: Double, on annotation: PDFAnnotation) {
@@ -831,6 +842,9 @@ private extension DocumentManager {
         let editable = item.document.allowsDocumentChanges
         let commenting = item.document.allowsCommenting
         switch action {
+        case .feature("background"), .feature("margins"): return editable
+        case .feature("header"), .feature("watermark"), .feature("bates"): return editable && commenting
+        case .feature("images"): return item.document.allowsCopying
         case .previous,.first: return item.pageIndex > 0
         case .next,.last: return item.pageIndex+1 < item.pageCount
         case .deletePage: return editable && item.pageCount > 1
@@ -1063,7 +1077,15 @@ private struct ContentView: View {
             StatusBar(manager: manager)
         }
         .overlay(alignment: .bottomTrailing) {
-            if manager.loadingFiles > 0 { HStack { ProgressView().controlSize(.small); Text(manager.language == .ru ? "Открытие PDF…" : "Opening PDF…").font(.system(size: 11)) }.padding(9).background(Palette.panel,in: RoundedRectangle(cornerRadius: 5)).padding(30) }
+            if let progress = manager.operationProgress {
+                HStack(spacing: 10) {
+                    VStack(alignment: .leading) {
+                        Text(manager.operationTitle).font(.caption)
+                        ProgressView(value: progress).frame(width: 170)
+                    }
+                    Button(manager.language == .ru ? "Отменить" : "Cancel") { manager.operationTask?.cancel() }
+                }.padding(12).background(Palette.panel, in: RoundedRectangle(cornerRadius: 6)).padding(30)
+            } else if manager.loadingFiles > 0 { HStack { ProgressView().controlSize(.small); Text(manager.language == .ru ? "Открытие PDF…" : "Opening PDF…").font(.system(size: 11)) }.padding(9).background(Palette.panel,in: RoundedRectangle(cornerRadius: 5)).padding(30) }
         }
         .background(Palette.ribbon)
         .background(WindowTitleSynchronizer(title: manager.title).frame(width: 0, height: 0))
@@ -1082,6 +1104,7 @@ private struct ContentView: View {
             DispatchQueue.main.async { (NSApp.delegate as? BotPlusAppDelegate)?.rebuildMenus() }
         }
         .onChange(of: manager.theme) { _, _ in manager.panels.synchronizeFloatingWindows(manager: manager) }
+        .sheet(item: $manager.formattingRequest) { PDFFormattingEditor(request: $0) }
         .sheet(isPresented: $manager.isAboutPresented) { AboutDialog(manager: manager) }
         .sheet(isPresented: $manager.isLicensePresented) { LicenseDialog(manager: manager) }
         .sheet(isPresented: $manager.isUpdatePresented) { UpdateDialog(manager: manager) }
@@ -3894,7 +3917,7 @@ private extension PDFViewer.Coordinator {
         let page = view.currentPage ?? item.document.page(at: item.pageIndex)
         if ["bookmarkCase","bookmarkZoom","bookmarkActions","bookmarkSort","bookmarkMerge","bookmarkTOC","bookmarkSortPages","bookmarkLinks","swap","clear"].contains(id) { manager.recordUndo(item,group: id) }
         switch id {
-        case "margins": cropMargins(item: item,view: view)
+        case "margins","background": showFormatting(id, item: item, view: view)
         case "replace": replacePages(item: item,view: view)
         case "alignFields": alignFields(item: item,view: view)
         case "emailCurrent","emailAll": emailPDF(item: item,view: view,currentPage: id == "emailCurrent")
@@ -4004,7 +4027,7 @@ private extension PDFViewer.Coordinator {
                 let box = page.bounds(for: .mediaBox).insetBy(dx: inset,dy: inset); guard box.width > 1,box.height > 1 else { return }
                 page.setBounds(box,for: .cropBox); self.reload(view,document: item,pageIndex: item.pageIndex); self.manager.send(.refresh)
             }
-        case "images": exportImages(item: item)
+        case "images": showFormatting(id, item: item, view: view)
         case "exportComments": exportComments(item: item)
         case "importComments": importComments(item: item,view: view)
         case "clear":
@@ -4013,7 +4036,7 @@ private extension PDFViewer.Coordinator {
         case "selectFields": manager.tool = .selectComments
         case "export": exportFormData(item: item)
         case "import": importFormData(item: item,view: view)
-        case "watermark","header","bates": decoratePages(id,item: item,view: view)
+        case "watermark","header","bates": showFormatting(id, item: item, view: view)
         case "addImage": importImage(page: page,view: view)
         case "newWindow": PDFWindowPool.shared.open()
         case "cascade": for (index,window) in NSApp.windows.filter({ $0 is NSPanel == false }).enumerated() { window.setFrameOrigin(CGPoint(x: 100+index*24,y: 120+index*24)) }
@@ -4119,23 +4142,6 @@ private extension PDFViewer.Coordinator {
             if !export.write(to: url,withOptions: [PDFDocumentWriteOption.saveTextFromOCROption:false]) { self?.manager.say("Export failed","Ошибка экспорта") }
         }
     }
-    func exportImages(item: PDFDocumentItem) {
-        let panel = NSOpenPanel(); panel.canChooseDirectories = true; panel.canChooseFiles = false; panel.canCreateDirectories = true
-        panel.begin { [weak self] response in
-            guard response == .OK,let folder = panel.url else { return }
-            let access = folder.startAccessingSecurityScopedResource(); defer { if access { folder.stopAccessingSecurityScopedResource() } }
-            do {
-                for index in 0..<item.pageCount {
-                    guard let page = item.document.page(at: index) else { continue }; let box = page.bounds(for: .cropBox)
-                    let scale = min(2,4096/max(box.width,box.height)); let image = PDFRasterizer.image(page,size: CGSize(width: box.width*scale,height: box.height*scale))
-                    guard let tiff = image.tiffRepresentation,let bitmap = NSBitmapImageRep(data: tiff),let png = bitmap.representation(using: .png,properties: [:]) else { continue }
-                    var url = folder.appendingPathComponent(String(format:"Page-%03d.png",Int32(index+1)))
-                    if FileManager.default.fileExists(atPath: url.path) { url = folder.appendingPathComponent("Page-\(index+1)-"+UUID().uuidString.prefix(6)+".png") }
-                    try png.write(to: url)
-                }; self?.manager.say("Images exported","Изображения экспортированы")
-            } catch { self?.manager.say("Export failed","Ошибка экспорта") }
-        }
-    }
     func exportComments(item: PDFDocumentItem) {
         PDFDialogs.save("Comments.pdf",type: .pdf) { [weak self] url in
             let result = PDFDocument()
@@ -4157,15 +4163,6 @@ private extension PDFViewer.Coordinator {
                         if let copy = annotation.copy() as? PDFAnnotation { copy.page = nil; AnnotationMetadata.transfer(from: [annotation],to: [copy]); page.addAnnotation(copy) }
                     }
                 }
-            }; view.setNeedsDisplay(view.bounds); self.manager.send(.refresh)
-        }
-    }
-    func decoratePages(_ id: String,item: PDFDocumentItem,view: PDFViewerView) {
-        PDFDialogs.prompt(manager.language == .ru ? "Оформление страниц" : "Page decoration",fields: [("Text / Текст",id == "watermark" ? "DRAFT" : "BotPlus")]) { [weak self,weak view] values in
-            guard let self,let view else { return }
-            for index in 0..<item.pageCount { guard let page = item.document.page(at: index) else { continue }; let crop = page.bounds(for: .cropBox),watermark = id == "watermark"
-                let rect = CGRect(x: crop.minX+20,y: watermark ? crop.midY-25 : crop.maxY-40,width: crop.width-40,height: 30)
-                let annotation = PDFAnnotation(bounds: rect,forType: .freeText,withProperties: nil); annotation.contents = values[0]+(id == "bates" ? String(format:"-%06d",Int32(index+1)) : ""); annotation.color = .clear; annotation.fontColor = NSColor(self.manager.annotationColor).withAlphaComponent(watermark ? 0.2 : 1); annotation.font = NSFont.boldSystemFont(ofSize: watermark ? 28 : 12); annotation.alignment = .center; AnnotationMetadata.setOpacity(watermark ? 0.2 : 1,on: annotation); page.addAnnotation(annotation)
             }; view.setNeedsDisplay(view.bounds); self.manager.send(.refresh)
         }
     }
@@ -4744,7 +4741,7 @@ private extension DocumentManager {
 }
 
 // MARK: First roadmap operations
-private enum PDFPageRange {
+enum PDFPageRange {
     static func parse(_ text: String,count: Int) -> [Int]? {
         guard count > 0 else { return nil }
         let input = text.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
@@ -4885,21 +4882,6 @@ private final class ToolDialogPool: NSObject,NSWindowDelegate {
 
 @MainActor
 private extension PDFViewer.Coordinator {
-    func cropMargins(item: PDFDocumentItem,view: PDFViewerView) {
-        PDFDialogs.prompt(manager.language == .ru ? "Поля страницы, pt (от MediaBox)" : "Page margins, pt (from MediaBox)",fields: [("Left / Слева","18"),("Right / Справа","18"),("Top / Сверху","18"),("Bottom / Снизу","18"),("Pages / Страницы",String(item.pageIndex+1))]) { [weak self,weak view] values in
-            guard let self,let view,view.document === item.document else { return }
-            guard let indices = PDFPageRange.parse(values[4],count: item.pageCount),let left = Double(values[0]),let right = Double(values[1]),let top = Double(values[2]),let bottom = Double(values[3]) else { self.manager.say("Invalid values or page range.","Некорректные значения или диапазон страниц."); return }
-            // Validate before taking an expensive Undo snapshot or changing any page.
-            let valid = [left,right,top,bottom].allSatisfy { $0.isFinite && $0 >= 0 } && indices.allSatisfy {
-                guard let page = item.document.page(at: $0) else { return false }; let media = page.bounds(for: .mediaBox)
-                return media.width-left-right > 1 && media.height-top-bottom > 1
-            }
-            guard valid else { self.manager.say("Margins exceed page dimensions.","Отступы превышают размеры страницы."); return }
-            self.manager.recordUndo(item,group: "margins")
-            guard PDFPageOperations.crop(item.document,indices: indices,left: left,right: right,top: top,bottom: bottom) else { return }
-            self.reload(view,document: item,pageIndex: item.pageIndex); self.manager.send(.refresh)
-        }
-    }
     func replacePages(item: PDFDocumentItem,view: PDFViewerView) {
         PDFDialogs.open([.pdf]) { [weak self,weak view] urls in
             guard let self,let view,let url = urls.first else { return }
@@ -4946,5 +4928,147 @@ private extension PDFViewer.Coordinator {
             }
             service.perform(withItems: [url])
         } catch { manager.say("Could not prepare a PDF attachment.","Не удалось подготовить PDF-вложение.") }
+    }
+}
+
+// MARK: Page formatting and independent image export
+@MainActor
+private extension PDFViewer.Coordinator {
+    func showFormatting(_ id: String, item: PDFDocumentItem, view: PDFViewerView) {
+        guard let kind = PDFFormattingKind(rawValue: id), finishSourceEditor(), manager.operationTask == nil else { return }
+        let document = item.document
+        let request = PDFFormattingRequest(kind: kind, document: document, pageIndex: item.pageIndex,
+            filename: item.filename, russian: manager.language == .ru,
+            isOwned: { AnnotationMetadata.isContainer($0) || AnnotationMetadata.decoration(of: $0) == kind.rawValue },
+            apply: { [weak self, weak view, weak item] options, remove in
+                guard let self, let view, let item, item.document === document, self.manager.selected?.id == item.id else {
+                    return "The document changed / Документ изменился"
+                }
+                return self.applyFormatting(kind, options: options, remove: remove, item: item, view: view)
+            })
+        DispatchQueue.main.async { [weak self] in self?.manager.formattingRequest = request }
+    }
+    func applyFormatting(_ kind: PDFFormattingKind, options: PDFFormattingOptions, remove: Bool,
+                         item: PDFDocumentItem, view: PDFViewerView) -> String? {
+        let russian = manager.language == .ru
+        func error(_ en: String, _ ru: String) -> String { russian ? ru : en }
+        guard manager.operationTask == nil else { return error("Another operation is running.", "Дождитесь текущей операции.") }
+        guard let indices = PDFPageRange.parse(options.range, count: item.pageCount) else {
+            return error("Invalid page range.", "Некорректный диапазон страниц.")
+        }
+        if kind == .images {
+            guard item.document.allowsCopying else { return error("PDF does not permit copying.", "PDF запрещает копирование.") }
+            for index in indices {
+                guard let page = item.document.page(at: index) else { return error("Page unavailable.", "Страница недоступна.") }
+                let (width, height) = PDFImageExporter.dimensions(page, dpi: options.dpi)
+                guard width > 0, height > 0, width <= 20_000, height <= 20_000, width * height <= 40_000_000 else {
+                    return error("Image exceeds 40 MP. Reduce DPI.", "Изображение превышает 40 Мп. Уменьшите DPI.")
+                }
+            }
+            DispatchQueue.main.async { [weak self] in self?.chooseImageExport(item: item, indices: indices, options: options) }
+            return nil
+        }
+        guard item.document.allowsDocumentChanges else { return error("PDF does not permit document changes.", "PDF запрещает изменение документа.") }
+        if kind == .margins {
+            let offsets = [options.left, options.right, options.top, options.bottom]
+            guard offsets.allSatisfy({ $0.isFinite && $0 >= 0 }), indices.allSatisfy({ index in
+                guard let page = item.document.page(at: index) else { return false }
+                let media = page.bounds(for: .mediaBox)
+                return media.width - options.left - options.right > 1 && media.height - options.top - options.bottom > 1
+            }) else { return error("Margins exceed page dimensions.", "Отступы превышают размеры страницы.") }
+            manager.recordUndo(item, group: "pageMargins")
+            _ = PDFPageOperations.crop(item.document, indices: indices, left: options.left, right: options.right, top: options.top, bottom: options.bottom)
+            reload(view, document: item, pageIndex: item.pageIndex); manager.send(.refresh)
+            return nil
+        }
+        guard options.opacity.isFinite, (0...1).contains(options.opacity) else { return error("Invalid opacity.", "Некорректная непрозрачность.") }
+        if kind == .background {
+            let document = item.document, stamp = PDFDocumentState.stamp(document)
+            let color = PDFColorComponents(options.color, opacity: options.opacity)
+            let operationID = UUID()
+            manager.activeOperationID = operationID
+            manager.operationProgress = 0
+            manager.operationTitle = kind.title(russian: russian)
+            manager.operationTask = Task { @MainActor [weak self, weak view] in
+                guard let self else { return }
+                defer { self.manager.operationTask = nil; self.manager.operationProgress = nil; self.manager.activeOperationID = nil }
+                do {
+                    let data = try self.sourceData(item)
+                    let progressOwner = self.manager
+                    let result = try await PDFPageBackgroundEngine.change(data: data, indices: indices, color: color,
+                        image: options.image, remove: remove) { [weak progressOwner] value in
+                            if progressOwner?.activeOperationID == operationID { progressOwner?.operationProgress = value }
+                        }
+                    try Task.checkCancellation()
+                    guard let view, self.manager.selected?.id == item.id, item.document === document,
+                          PDFDocumentState.stamp(document) == stamp else {
+                        self.manager.say("Document changed during the operation. Changes were not applied.", "Документ изменился во время операции. Результат не применён."); return
+                    }
+                    try self.installSourceData(result, item: item, index: item.pageIndex, view: view, bounds: nil)
+                } catch is CancellationError { }
+                catch { self.sourceError(error) }
+            }
+            return nil
+        }
+        guard item.document.allowsCommenting else { return error("PDF does not permit annotations.", "PDF запрещает аннотации.") }
+        guard remove || (options.fontSize.isFinite && (4...200).contains(options.fontSize)
+                          && options.batesStart >= 0 && options.batesStart <= 1_000_000_000
+                          && (1...12).contains(options.batesDigits)) else {
+            return error("Font size: 4–200 pt; Bates start: 0–1000000000; digits: 1–12.", "Размер шрифта: 4–200 pt; начало Бейтса: 0–1000000000; цифр: 1–12.")
+        }
+        manager.recordUndo(item, group: "decoration-" + kind.rawValue)
+        for (sequence, index) in indices.enumerated() {
+            guard let page = item.document.page(at: index) else { continue }
+            for old in page.annotations where AnnotationMetadata.decoration(of: old) == kind.rawValue { page.removeAnnotation(old) }
+            if !remove {
+                for annotation in PDFDecorationEngine.annotations(kind: kind, options: options, box: page.bounds(for: .cropBox),
+                    page: index, count: item.pageCount, filename: item.filename, sequence: sequence, russian: russian) {
+                    AnnotationMetadata.setOpacity(options.opacity, on: annotation)
+                    AnnotationMetadata.setDecoration(kind.rawValue, on: annotation)
+                    page.addAnnotation(annotation)
+                }
+            }
+        }
+        view.setNeedsDisplay(view.bounds); manager.send(.refresh)
+        return nil
+    }
+    func chooseImageExport(item: PDFDocumentItem, indices: [Int], options: PDFFormattingOptions) {
+        guard manager.operationTask == nil else { return }
+        let panel = NSOpenPanel(); panel.canChooseDirectories = true; panel.canChooseFiles = false; panel.canCreateDirectories = true
+        panel.begin { [weak self] response in
+            guard let self, response == .OK, let destination = panel.url else { return }
+            DispatchQueue.main.async {
+                guard self.manager.operationTask == nil else { return }
+                let lease = FileAccessLease(destination)
+                let basename = URL(fileURLWithPath: item.filename).deletingPathExtension().lastPathComponent
+                let folder = destination.appendingPathComponent(basename + "-images-" + String(UUID().uuidString.prefix(8)), isDirectory: true)
+                let exportOptions = PDFImageExportOptions(indices: indices, format: options.format, dpi: options.dpi,
+                    transparent: options.transparent && options.format != .jpeg, quality: options.jpegQuality)
+                let operationID = UUID()
+                self.manager.activeOperationID = operationID
+                self.manager.operationTitle = self.manager.language == .ru ? "Экспорт изображений" : "Export images"
+                self.manager.operationProgress = 0
+                let owner = self
+                self.manager.operationTask = Task { @MainActor [weak owner] in
+                    guard let self = owner else { return }
+                    defer { _ = lease; self.manager.operationTask = nil; self.manager.operationProgress = nil; self.manager.activeOperationID = nil }
+                    do {
+                        let data = try self.manager.serializedData(item)
+                        let manager = self.manager
+                        let worker = Task.detached(priority: .userInitiated) {
+                            try PDFImageExporter.export(data: data, to: folder, options: exportOptions) { [weak manager] value in
+                                Task { @MainActor in
+                                    if manager?.activeOperationID == operationID { manager?.operationProgress = value }
+                                }
+                            }
+                        }
+                        let count = try await withTaskCancellationHandler(operation: { try await worker.value }, onCancel: { worker.cancel() })
+                        self.manager.say("Exported \(count) images to:\n\(folder.path)", "Экспортировано изображений: \(count)\n\(folder.path)")
+                    } catch is CancellationError { }
+                    catch PDFImageExportError.tooLarge { self.manager.say("Image exceeds 40 MP. Reduce DPI.", "Изображение превышает 40 Мп. Уменьшите DPI.") }
+                    catch { self.manager.say("Image export failed. Existing files are intact.", "Ошибка экспорта изображений. Существующие файлы сохранены.") }
+                }
+            }
+        }
     }
 }

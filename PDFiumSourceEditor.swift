@@ -1483,3 +1483,112 @@ final class PDFContentSession {
         defer { BotPlusPDFium_Free(bytes) }; return Data(bytes: bytes,count: count)
     }
 }
+
+/// Background objects are marked in the content stream and inserted at index 0,
+/// so updating/removing our background never erases original page objects.
+@MainActor
+enum PDFPageBackgroundEngine {
+    private static let markName = "BotPlusPageBackground_v1"
+    static func change(data: Data, indices: [Int], color: PDFColorComponents,
+                       image: CGImage?, remove: Bool, progress: (Double) -> Void) async throws -> Data {
+        _ = PDFiumRuntime.ready
+        var normalized = data
+        for (position, index) in indices.enumerated() {
+            try Task.checkCancellation()
+            normalized = try PDFContentNormalizer.prepare(normalized, pageIndex: index)
+            progress(Double(position + 1) / Double(max(1, indices.count)) * 0.2)
+            await Task.yield()
+        }
+        let storage = normalized as NSData
+        guard let document = FPDF_LoadMemDocument64(storage.bytes, storage.length, nil) else { throw PDFSourceError.document }
+        defer { FPDF_CloseDocument(document); _ = storage }
+        guard FPDF_GetDocPermissions(document) & (1 << 3) != 0 else { throw PDFSourceError.permission }
+        for (position, index) in indices.enumerated() {
+            try Task.checkCancellation()
+            try changePage(document: document, index: index, color: color, image: image, remove: remove)
+            progress(0.2 + Double(position + 1) / Double(max(1, indices.count)) * 0.75)
+            await Task.yield()
+        }
+        try Task.checkCancellation()
+        var length = 0
+        guard let bytes = BotPlusPDFium_SaveDocument(document, &length), length > 0 else { throw PDFSourceError.save }
+        defer { BotPlusPDFium_Free(bytes) }
+        progress(1)
+        return Data(bytes: bytes, count: length)
+    }
+    private static func owned(_ object: FPDF_PAGEOBJECT) -> Bool {
+        for index in 0..<max(0, FPDFPageObj_CountMarks(object)) {
+            guard let mark = FPDFPageObj_GetMark(object, UInt(index)) else { continue }
+            var length: UInt = 0
+            guard FPDFPageObjMark_GetName(mark, nil, 0, &length) != 0, length > 0, length < 4096 else { continue }
+            var units = [UInt16](repeating: 0, count: Int(length / 2))
+            _ = units.withUnsafeMutableBufferPointer { FPDFPageObjMark_GetName(mark, $0.baseAddress, length, &length) }
+            if String(decoding: units.prefix { $0 != 0 }, as: UTF16.self) == markName { return true }
+        }
+        return false
+    }
+    private static func insert(_ object: FPDF_PAGEOBJECT, page: FPDF_PAGE, index: Int) throws {
+        guard markName.withCString({ FPDFPageObj_AddMark(object, $0) }) != nil,
+              FPDFPage_InsertObjectAtIndex(page, object, index) != 0 else {
+            FPDFPageObj_Destroy(object); throw PDFSourceError.content
+        }
+    }
+    private static func changePage(document: FPDF_DOCUMENT, index: Int, color: PDFColorComponents,
+                                   image: CGImage?, remove: Bool) throws {
+        guard let page = FPDF_LoadPage(document, Int32(index)) else { throw PDFSourceError.page }
+        defer { FPDF_ClosePage(page) }
+        for objectIndex in stride(from: Int(FPDFPage_CountObjects(page)) - 1, through: 0, by: -1) {
+            guard let object = FPDFPage_GetObject(page, Int32(objectIndex)), owned(object) else { continue }
+            guard FPDFPage_RemoveObject(page, object) != 0 else { throw PDFSourceError.content }
+            FPDFPageObj_Destroy(object)
+        }
+        if !remove {
+            var left: Float = 0, bottom: Float = 0, right: Float = 0, top: Float = 0
+            if FPDFPage_GetCropBox(page, &left, &bottom, &right, &top) == 0 {
+                guard FPDFPage_GetMediaBox(page, &left, &bottom, &right, &top) != 0 else { throw PDFSourceError.page }
+            }
+            guard right > left, top > bottom else { throw PDFSourceError.page }
+            func component(_ value: Double) -> UInt32 { UInt32((min(1, max(0, value)) * 255).rounded()) }
+            guard let fill = FPDFPageObj_CreateNewRect(left, bottom, right - left, top - bottom) else { throw PDFSourceError.content }
+            guard FPDFPageObj_SetFillColor(fill, component(color.red), component(color.green), component(color.blue), component(color.alpha)) != 0,
+                  FPDFPath_SetDrawMode(fill, FPDF_FILLMODE_WINDING, 0) != 0 else {
+                FPDFPageObj_Destroy(fill); throw PDFSourceError.content
+            }
+            try insert(fill, page: page, index: 0)
+            if let image {
+                let width = image.width, height = image.height
+                guard width > 0, height > 0, width * height <= 40_000_000,
+                      let bitmap = FPDFBitmap_CreateEx(Int32(width), Int32(height), FPDFBitmap_BGRA, nil, 0) else { throw PDFSourceError.content }
+                defer { FPDFBitmap_Destroy(bitmap) }
+                guard let buffer = FPDFBitmap_GetBuffer(bitmap), let context = CGContext(data: buffer, width: width, height: height,
+                    bitsPerComponent: 8, bytesPerRow: Int(FPDFBitmap_GetStride(bitmap)), space: CGColorSpaceCreateDeviceRGB(),
+                    bitmapInfo: CGImageAlphaInfo.premultipliedFirst.rawValue | CGBitmapInfo.byteOrder32Little.rawValue) else { throw PDFSourceError.content }
+                context.clear(CGRect(x: 0, y: 0, width: width, height: height))
+                context.translateBy(x: 0, y: CGFloat(height)); context.scaleBy(x: 1, y: -1)
+                context.draw(image, in: CGRect(x: 0, y: 0, width: width, height: height))
+                let pixels = buffer.assumingMemoryBound(to: UInt8.self), stride = Int(FPDFBitmap_GetStride(bitmap))
+                for row in 0..<height { for column in 0..<width {
+                    let offset = row * stride + column * 4, alpha = Int(pixels[offset + 3])
+                    if alpha > 0 && alpha < 255 {
+                        for channel in 0..<3 { pixels[offset + channel] = UInt8(min(255, (Int(pixels[offset + channel]) * 255 + alpha / 2) / alpha)) }
+                    }
+                    pixels[offset + 3] = UInt8((Double(alpha) * min(1, max(0, color.alpha))).rounded())
+                } }
+                guard let object = FPDFPageObj_NewImageObj(document) else { throw PDFSourceError.content }
+                var visiblePage: FPDF_PAGE? = page
+                guard FPDFImageObj_SetBitmap(&visiblePage, 1, object, bitmap) != 0,
+                      FPDFImageObj_SetMatrix(object, Double(right - left), 0, 0, Double(top - bottom), Double(left), Double(bottom)) != 0 else {
+                    FPDFPageObj_Destroy(object); throw PDFSourceError.content
+                }
+                try insert(object, page: page, index: 1)
+            }
+        }
+        if FPDFPage_CountObjects(page) == 0 {
+            guard let sentinel = FPDFPageObj_CreateNewRect(0, 0, 0.01, 0.01) else { throw PDFSourceError.content }
+            _ = FPDFPageObj_SetFillColor(sentinel, 0, 0, 0, 0)
+            _ = FPDFPath_SetDrawMode(sentinel, FPDF_FILLMODE_WINDING, 0)
+            FPDFPage_InsertObject(page, sentinel)
+        }
+        guard FPDFPage_GenerateContent(page) != 0 else { throw PDFSourceError.content }
+    }
+}

@@ -165,3 +165,7 @@ Version 1.1 supports thumbnail pinch gestures and Ctrl/Command+wheel zoom. A bou
 Run `BOTPLUS_BENCH_PDF="/absolute/path/document.pdf" BOTPLUS_BENCH_PAGES="1,3" BOTPLUS_BENCH_REPORT="$PWD/performance.json" ./Tools/verify_native.sh`. Add `BOTPLUS_CHECK_OPTIMIZATION=-O` for optimized diagnostics. The report contains timings and counts, with no extracted text or source filename; the input PDF stays read-only and temporary copies are removed.
 
 Opening reads file bytes asynchronously in the application. Unchanged source bytes and Undo snapshots share a bounded cache; native form changes invalidate it. Cached line geometry reduces block clustering work and the editor takes exclusive ownership of the parsed page. Loaded PDFs retain original streams while page identities/order, outlines and attributes stay unchanged. Reassembled documents use a separate page graph; this conservative path can still take seconds. See [PERFORMANCE.md](PERFORMANCE.md).
+
+## New in 1.4
+
+Live margin preview; headers/footers, watermark and Bates templates with ranges, styling and persistent replacement/removal; color/image backgrounds behind original PDF objects; PNG/JPEG/TIFF export with DPI, transparency, rotation, progress and cancellation. Export uses an independent snapshot and a new subfolder. Raster output is limited to 40 MP per page. Untagged decoration created by older versions is kept.

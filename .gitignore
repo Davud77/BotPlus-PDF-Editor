@@ -44,3 +44,6 @@ dist/
 
 # Local performance reports (no sample PDFs are committed)
 performance*.json
+
+# Local deliverables and development previews
+outputs/
