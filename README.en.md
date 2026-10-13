@@ -169,3 +169,7 @@ Opening reads file bytes asynchronously in the application. Unchanged source byt
 ## New in 1.4
 
 Live margin preview; headers/footers, watermark and Bates templates with ranges, styling and persistent replacement/removal; color/image backgrounds behind original PDF objects; PNG/JPEG/TIFF export with DPI, transparency, rotation, progress and cancellation. Export uses an independent snapshot and a new subfolder. Raster output is limited to 40 MP per page. Untagged decoration created by older versions is kept.
+
+### Zoom fixes in 1.4.1
+
+Queued PDF gestures are bound to their document. Unchanged selection state no longer republishes every viewport update; content outlines are reused across zoom/pan. Cold thumbnail gestures start with a lightweight raster and upgrade after settling. The actual thumbnail cache now renders annotations on new blank pages. Native handler tests cover focus-free zoom, burst/reverse deltas, document switching and caches; physical trackpad pinch is not synthesized by the test API.

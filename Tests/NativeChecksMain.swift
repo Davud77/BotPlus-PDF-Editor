@@ -13,6 +13,7 @@ extension PDFViewerView {
 }
 extension PDFViewer.Coordinator {
     fileprivate func checkCommand(_ command: ViewerCommand, view: PDFViewerView) { perform(command, on: view) }
+    fileprivate func checkContentOutlines(view: PDFViewerView) { refreshContentOutlines(view) }
     fileprivate func checkSync(view: PDFViewerView) { observeScroll(in: view); syncPage(); syncMetrics(for: view) }
 }
 
@@ -944,7 +945,7 @@ private func checkFormatting(root: URL) async throws {
     let freeText = PDFAnnotation(bounds: CGRect(x: 30, y: 550, width: 400, height: 100), forType: .freeText, withProperties: nil)
     freeText.contents = "NEW PAGE"; freeText.font = NSFont.systemFont(ofSize: 40); freeText.fontColor = .black; freeText.color = .clear
     emptyPage.addAnnotation(freeText)
-    let thumbnail = PDFRasterizer.image(emptyPage, size: NSSize(width: 153, height: 198))
+    let thumbnail = PDFThumbnailCache.shared.image(page: emptyPage, documentID: UUID(), index: 0, revision: 1, width: 153, ratio: 792.0/612.0, interactive: false)
     let bitmap = NSBitmapImageRep(data: thumbnail.tiffRepresentation!)!
     var ink = 0
     for y in 0..<bitmap.pixelsHigh { for x in 0..<bitmap.pixelsWide {
@@ -1025,7 +1026,20 @@ private func checkFormatting(root: URL) async throws {
         fatalError("oversized export should fail")
     } catch PDFImageExportError.tooLarge { }
     expect(!FileManager.default.fileExists(atPath: tooLarge.path), "failed export removes only its own partial directory")
+    manager.tool = .editContent
+    coordinator.checkContentOutlines(view: view)
+    for _ in 0..<100 where coordinator.contentOutlineBuildCount == 0 {
+        try await Task.sleep(nanoseconds: 10_000_000)
+    }
+    let countBeforeZoom = coordinator.contentOutlineBuildCount
+    for _ in 0..<100 { coordinator.checkContentOutlines(view: view) }
+    try await Task.sleep(nanoseconds: 50_000_000)
+    if coordinator.contentOutlineBuildCount != countBeforeZoom || countBeforeZoom == 0 {
+        FileHandle.standardError.write(Data("Outline builds before/after: \(countBeforeZoom)/\(coordinator.contentOutlineBuildCount)\n".utf8))
+    }
+    expect(countBeforeZoom > 0 && coordinator.contentOutlineBuildCount == countBeforeZoom, "pan/zoom keeps content outlines when pages and revision are unchanged")
     coordinator.detach()
+    try checkZoomSafety()
     print("PASS: decoration templates/ranges/replacement/persistence, margins validation, vector background ordering/update/removal, PNG/JPEG/TIFF export and rotation")
 }
 
@@ -1033,4 +1047,38 @@ private func checkFormatting(root: URL) async throws {
 private final class FormattingCheckStatus {
     var finished = false
     var error: Error?
+}
+
+@MainActor
+private func checkZoomSafety() throws {
+    func expect(_ condition: @autoclosure () -> Bool, _ message: String) {
+        if !condition() { fatalError("ZOOM CHECK FAILED: \(message)") }
+    }
+    let original = PDFDocument(); original.insert(PDFRasterizer.textPage("ZOOM ORIGINAL")!, at: 0)
+    let other = PDFDocument(); other.insert(PDFRasterizer.textPage("ZOOM OTHER")!, at: 0)
+    let view = PDFViewerView(frame: CGRect(x: 0, y: 0, width: 500, height: 500))
+    view.document = original; view.autoScales = false; view.scaleFactor = 1
+    let anchor = CGPoint(x: 250, y: 250)
+    for _ in 0..<100 { view.checkQueuedMagnify(0.002, anchor: anchor) }
+    view.checkFlushMagnify()
+    expect(abs(view.scaleFactor - exp(0.2)) < 0.001, "100 gesture events are coalesced without lost deltas")
+    view.checkQueuedMagnify(0.5, anchor: anchor)
+    view.document = other; view.scaleFactor = 1
+    view.checkFlushMagnify()
+    expect(abs(view.scaleFactor - 1) < 0.001, "old document gesture does not zoom a newly selected document")
+    view.checkQueuedMagnify(0.05, anchor: anchor); view.checkQueuedMagnify(-0.05, anchor: anchor); view.checkFlushMagnify()
+    expect(abs(view.scaleFactor - 1) < 0.001, "reverse burst restores scale")
+    view.checkQueuedMagnify(.nan, anchor: anchor); view.checkFlushMagnify()
+    expect(abs(view.scaleFactor - 1) < 0.001, "nonfinite magnification is ignored")
+    view.stopEventMonitoring()
+    let cache = PDFThumbnailCache()
+    let key = UUID()
+    let first = cache.image(page: original.page(at: 0)!, documentID: key, index: 0, revision: 1, width: 600, ratio: 792.0/612.0, interactive: true)
+    let pixels = NSBitmapImageRep(data: first.tiffRepresentation!)!
+    expect(pixels.pixelsWide == 128, "cold thumbnail gesture starts with a cheap raster")
+    _ = cache.image(page: original.page(at: 0)!, documentID: key, index: 0, revision: 1, width: 600, ratio: 792.0/612.0, interactive: true)
+    expect(cache.renderCount == 1, "gesture reuses the same thumbnail raster")
+    _ = cache.image(page: original.page(at: 0)!, documentID: key, index: 0, revision: 1, width: 600, ratio: 792.0/612.0, interactive: false)
+    expect(cache.renderCount == 2, "detail is upgraded after the gesture")
+    print("PASS: burst gesture zoom, document isolation, reverse/invalid deltas, cold thumbnail zoom and cached outline reuse")
 }

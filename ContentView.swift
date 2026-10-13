@@ -10,7 +10,7 @@ import UniformTypeIdentifiers
 
 private enum BotPlusBrand {
     static let name = "BotPlus PDF Editor"
-    static let version = "1.4"
+    static let version = "1.4.1"
     static let copyright = "© 2026 BotPlus"
     static let supportURL = URL(string: "https://github.com/Davud77/BotPlus-PDF-Editor")!
     static let telegramURL = URL(string: "https://t.me/botplus_pdf")!
@@ -454,6 +454,7 @@ private final class DocumentManager: ObservableObject {
     }
     @Published var thumbnailZoom = 0.55
     @Published var thumbnailGestureActive = false
+    var thumbnailGestureOwner: UUID?
     private var embeddedTextDocument: ObjectIdentifier?
     private var embeddedTextRevision = -1
     private var embeddedTextData: Data?
@@ -2442,26 +2443,42 @@ private struct PDFViewer: NSViewRepresentable {
             if contentSessions.count >= 3 { contentSessions.removeAll() }
             contentSessions[index] = session; return session
         }
+        private struct ContentOutlineKey: Equatable {
+            let document: ObjectIdentifier
+            let revision: Int
+            let pages: [Int]
+        }
+        private var contentOutlineKey: ContentOutlineKey?
+        private(set) var contentOutlineBuildCount = 0
         private func refreshContentOutlines(_ view: PDFViewerView) {
             guard manager.tool == .editContent,let item = manager.selected,view.document === item.document else {
-                view.contentOutlines = []
+                view.contentOutlines = []; contentOutlineKey = nil
                 if view.contentSelection != nil { clearContentSelection(view) }
                 return
             }
-            guard !contentRefreshPending else { return }; contentRefreshPending = true
+            let visible = (view.visiblePages.isEmpty ? (view.currentPage.map { [$0] } ?? []) : view.visiblePages).prefix(3)
+            let requestedKey = ContentOutlineKey(document: ObjectIdentifier(item.document), revision: manager.contentRevision,
+                pages: visible.map { item.document.index(for: $0) })
+            guard requestedKey != contentOutlineKey, !contentRefreshPending else { return }
+            contentRefreshPending = true
             let identity = ObjectIdentifier(item.document)
             Task { @MainActor [weak self,weak view,weak item] in
                 await Task.yield()
                 guard let self else { return }; defer { self.contentRefreshPending = false }
                 guard let view,let item,view.document === item.document,ObjectIdentifier(item.document) == identity,self.manager.tool == .editContent else { return }
+                let pages = Array((view.visiblePages.isEmpty ? (view.currentPage.map { [$0] } ?? []) : view.visiblePages).prefix(3))
+                let key = ContentOutlineKey(document: identity, revision: self.manager.contentRevision,
+                    pages: pages.map { item.document.index(for: $0) })
+                guard key != self.contentOutlineKey else { return }
                 var outlines: [(page: PDFPage,object: PDFSourceSession.ContentObject)] = []
                 do {
-                    for page in (view.visiblePages.isEmpty ? (view.currentPage.map { [$0] } ?? []) : view.visiblePages).prefix(3) {
+                    for page in pages {
                         let index = item.document.index(for: page)
                         let session = try self.contentSession(item: item,index: index)
                         outlines += session.objects.map { (page,$0) }
                     }
-                    view.contentOutlines = outlines; view.refreshOverlay()
+                    view.contentOutlines = outlines; self.contentOutlineKey = key
+                    self.contentOutlineBuildCount += 1; view.refreshOverlay()
                 } catch { self.sourceError(error) }
             }
         }
@@ -2806,7 +2823,9 @@ private struct PDFViewer: NSViewRepresentable {
                 self.syncScheduled = false
                 guard let view, let item = self.manager.selected, view.document === item.document else { return }
                 self.observeScroll(in: view)
-                self.manager.hasTextSelection = view.currentSelection != nil; self.syncPage(); self.syncMetrics(for: view); view.sourceInline?.updatePlacement(); view.refreshOverlay(); self.refreshSourceOutlines(view); self.refreshContentOutlines(view)
+                let hasSelection = view.currentSelection != nil
+                if self.manager.hasTextSelection != hasSelection { self.manager.hasTextSelection = hasSelection }
+                self.syncPage(); self.syncMetrics(for: view); view.sourceInline?.updatePlacement(); view.refreshOverlay(); self.refreshSourceOutlines(view); self.refreshContentOutlines(view)
                 if item.zoom != view.scaleFactor { item.zoom = view.scaleFactor }
             }
         }
@@ -3246,6 +3265,7 @@ private final class PDFViewerView: PDFView {
     private var requestedScrollOrigin: CGPoint?
     private var lastScrollOrigin: CGPoint?
     private var eventMonitor: Any?
+    private var pendingZoomDocument: ObjectIdentifier?
     private var pendingZoom: CGFloat = 0
     private var zoomAnchor: CGPoint?
     private var zoomScheduled = false
@@ -3296,7 +3316,7 @@ private final class PDFViewerView: PDFView {
         }
     }
     func stopEventMonitoring() {
-        pendingZoom = 0; zoomAnchor = nil; zoomScheduled = false
+        pendingZoom = 0; pendingZoomDocument = nil; zoomAnchor = nil; zoomScheduled = false
         if let eventMonitor { NSEvent.removeMonitor(eventMonitor) }; eventMonitor = nil
         if cursorPushed { NSCursor.pop(); cursorPushed = false }
     }
@@ -3656,15 +3676,18 @@ private final class PDFViewerView: PDFView {
         refreshOverlay(); onViewportChange?()
     }
     private func queueMagnification(_ delta: CGFloat,at point: CGPoint) {
-        guard delta.isFinite,delta != 0 else { return }
+        guard delta.isFinite,delta != 0,let document else { return }
+        let identity = ObjectIdentifier(document)
+        if pendingZoomDocument != identity { pendingZoom = 0; pendingZoomDocument = identity }
         pendingZoom += delta; zoomAnchor = point
         guard !zoomScheduled else { return }; zoomScheduled = true
         DispatchQueue.main.async { [weak self] in self?.flushMagnification() }
     }
     private func flushMagnification() {
         zoomScheduled = false
-        let delta = pendingZoom,point = zoomAnchor; pendingZoom = 0; zoomAnchor = nil
-        if let point { applyMagnification(delta,at: point) }
+        let delta = pendingZoom,point = zoomAnchor,identity = pendingZoomDocument
+        pendingZoom = 0; pendingZoomDocument = nil; zoomAnchor = nil
+        if let point,let document,identity == ObjectIdentifier(document) { applyMagnification(delta,at: point) }
     }
     func configureZoomLimits() { if minScaleFactor != PDFZoomLimits.minimum { minScaleFactor = PDFZoomLimits.minimum }; if maxScaleFactor != PDFZoomLimits.maximum { maxScaleFactor = PDFZoomLimits.maximum } }
     private func applyMagnification(_ delta: CGFloat, at anchor: CGPoint) {
@@ -4493,6 +4516,7 @@ private final class ThumbnailGestureView: NSView {
     private var pendingValue: Double?
     private var scheduled = false
     private var detailWork: DispatchWorkItem?
+    private let gestureID = UUID()
     override func hitTest(_ point: NSPoint) -> NSView? { nil }
     override func viewDidMoveToWindow() {
         super.viewDidMoveToWindow(); stop(); guard window != nil else { return }
@@ -4510,9 +4534,15 @@ private final class ThumbnailGestureView: NSView {
     }
     func adjust(_ delta: Double) {
         guard delta.isFinite,let manager else { return }
+        manager.thumbnailGestureOwner = gestureID
         if !manager.thumbnailGestureActive { manager.thumbnailGestureActive = true }
         detailWork?.cancel()
-        let work = DispatchWorkItem { [weak manager] in manager?.thumbnailGestureActive = false }
+        let owner = gestureID
+        let work = DispatchWorkItem { [weak manager] in
+            guard manager?.thumbnailGestureOwner == owner else { return }
+            manager?.thumbnailGestureOwner = nil
+            if manager?.thumbnailGestureActive == true { manager?.thumbnailGestureActive = false }
+        }
         detailWork = work; DispatchQueue.main.asyncAfter(deadline: .now()+0.18,execute: work)
         pendingValue = Self.zoom((pendingValue ?? manager.thumbnailZoom),delta: delta)
         guard !scheduled else { return }; scheduled = true
@@ -4523,7 +4553,17 @@ private final class ThumbnailGestureView: NSView {
         if let value = pendingValue { pendingValue = nil; manager?.thumbnailZoom = value }
     }
     static func zoom(_ value: Double,delta: Double) -> Double { min(1,max(0,value+delta*0.75)) }
-    func stop() { if let monitor { NSEvent.removeMonitor(monitor) }; monitor = nil; pendingValue = nil; detailWork = nil }
+    func stop() {
+        if let monitor { NSEvent.removeMonitor(monitor) }
+        monitor = nil; pendingValue = nil; scheduled = false
+        detailWork?.cancel(); detailWork = nil
+        let owner = gestureID
+        DispatchQueue.main.async { [weak manager] in
+            guard manager?.thumbnailGestureOwner == owner else { return }
+            manager?.thumbnailGestureOwner = nil
+            if manager?.thumbnailGestureActive == true { manager?.thumbnailGestureActive = false }
+        }
+    }
 }
 
 @MainActor
@@ -4537,7 +4577,8 @@ private final class PDFThumbnailCache {
     private(set) var renderCount = 0
     init() { cache.totalCostLimit = 48*1024*1024; cache.countLimit = 240 }
     func image(page: PDFPage,documentID: UUID,index: Int,revision: Int,width: CGFloat,ratio: CGFloat,interactive: Bool = false) -> NSImage {
-        let bucket = min(1280,max(128,Int(ceil(width*2/128))*128))
+        let requestedBucket = min(1280,max(128,Int(ceil(width*2/128))*128))
+        let bucket = interactive ? 128 : requestedBucket
         let key = "\(documentID.uuidString)|\(index)|\(revision)" as NSString
         // During a gesture, immediately scale the current raster. Upgrade its
         // detail after the gesture settles, without storing every zoom size.
@@ -4545,11 +4586,12 @@ private final class PDFThumbnailCache {
         let height = max(1,CGFloat(bucket)*max(0.1,min(12,ratio)))
         let factor = min(1,4096/max(CGFloat(bucket),height))
         let w = max(1,Int(CGFloat(bucket)*factor)),h = max(1,Int(height*factor))
-        guard let ref = page.pageRef,let context = CGContext(data: nil,width: w,height: h,bitsPerComponent: 8,bytesPerRow: w*4,space: CGColorSpaceCreateDeviceRGB(),bitmapInfo: CGImageAlphaInfo.premultipliedLast.rawValue) else { return NSImage(size: CGSize(width: width,height: width*ratio)) }
+        guard let context = CGContext(data: nil,width: w,height: h,bitsPerComponent: 8,bytesPerRow: w*4,space: CGColorSpaceCreateDeviceRGB(),bitmapInfo: CGImageAlphaInfo.premultipliedLast.rawValue) else { return NSImage(size: CGSize(width: width,height: width*ratio)) }
         let rect = CGRect(x: 0,y: 0,width: w,height: h)
         context.setFillColor(NSColor.white.cgColor); context.fill(rect)
         NSGraphicsContext.saveGraphicsState(); NSGraphicsContext.current = NSGraphicsContext(cgContext: context,flipped: false)
-        context.concatenate(ref.getDrawingTransform(.cropBox,rect: rect,rotate: 0,preserveAspectRatio: true)); context.drawPDFPage(ref)
+        context.concatenate(PDFFormattingGeometry.transform(page, box: .cropBox, target: rect))
+        if let ref = page.pageRef { context.drawPDFPage(ref) }
         for annotation in page.annotations where annotation.shouldDisplay && !AnnotationMetadata.isContainer(annotation) { annotation.draw(with: .cropBox,in: context) }
         NSGraphicsContext.restoreGraphicsState()
         guard let bitmap = context.makeImage() else { return NSImage(size: rect.size) }
