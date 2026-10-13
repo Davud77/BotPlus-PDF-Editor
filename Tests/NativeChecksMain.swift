@@ -925,6 +925,18 @@ private func checkFormatting(root: URL) async throws {
     func expect(_ condition: @autoclosure () -> Bool, _ message: String) {
         if !condition() { fatalError("FORMAT CHECK FAILED: \(message)") }
     }
+    let emptyPage = PDFPage()
+    emptyPage.setBounds(CGRect(x: 0, y: 0, width: 612, height: 792), for: .mediaBox)
+    let freeText = PDFAnnotation(bounds: CGRect(x: 30, y: 550, width: 400, height: 100), forType: .freeText, withProperties: nil)
+    freeText.contents = "NEW PAGE"; freeText.font = NSFont.systemFont(ofSize: 40); freeText.fontColor = .black; freeText.color = .clear
+    emptyPage.addAnnotation(freeText)
+    let thumbnail = PDFRasterizer.image(emptyPage, size: NSSize(width: 153, height: 198))
+    let bitmap = NSBitmapImageRep(data: thumbnail.tiffRepresentation!)!
+    var ink = 0
+    for y in 0..<bitmap.pixelsHigh { for x in 0..<bitmap.pixelsWide {
+        if let color = bitmap.colorAt(x: x, y: y)?.usingColorSpace(.sRGB), color.redComponent < 0.8 { ink += 1 }
+    } }
+    expect(ink > 0, "blank PDF page without a CGPDFPage still renders text annotations in thumbnails")
     let document = PDFDocument()
     for index in 0..<3 {
         guard let page = PDFRasterizer.textPage("ORIGINAL \(index + 1)"), let copy = page.copy() as? PDFPage else { fatalError("fixture") }
@@ -969,6 +981,11 @@ private func checkFormatting(root: URL) async throws {
     let first = try PDFContentSession(data: background, pageIndex: 0)
     expect(first.objects.count == oldCount + 1, "background adds one object")
     expect(first.objects.first?.kind == "path", "background inserted behind original objects")
+    let image = NSImage(size: CGSize(width: 16, height: 16), flipped: false) { rect in NSColor.green.setFill(); rect.fill(); return true }
+    let imageBackground = try await PDFPageBackgroundEngine.change(data: background, indices: [0], color: red,
+        image: image.cgImage(forProposedRect: nil, context: nil, hints: nil)!, remove: false) { _ in }
+    let imageObjects = try PDFContentSession(data: imageBackground, pageIndex: 0).objects
+    expect(imageObjects.count == oldCount + 1 && imageObjects.first?.kind == "image", "image replaces color background as one object behind original content")
     let replaced = try await PDFPageBackgroundEngine.change(data: background, indices: [0, 2], color: PDFColorComponents(.blue), image: nil, remove: false) { _ in }
     let replacedCount = try PDFContentSession(data: replaced, pageIndex: 0).objects.count
     expect(replacedCount == oldCount + 1, "background update preserves mark and replaces old fill")

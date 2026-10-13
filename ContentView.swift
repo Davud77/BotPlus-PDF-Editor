@@ -3834,9 +3834,10 @@ private enum PDFRasterizer {
     private static let backingDocuments = NSMapTable<PDFPage,PDFDocument>.weakToStrongObjects()
     static func image(_ page: PDFPage,size: CGSize) -> NSImage {
         NSImage(size: size,flipped: false) { rect in
-            guard let ref = page.pageRef,let context = NSGraphicsContext.current?.cgContext else { return false }
+            guard let context = NSGraphicsContext.current?.cgContext else { return false }
             context.setFillColor(NSColor.white.cgColor); context.fill(rect); context.saveGState()
-            context.concatenate(ref.getDrawingTransform(.cropBox,rect: rect,rotate: 0,preserveAspectRatio: true)); context.drawPDFPage(ref)
+            context.concatenate(PDFFormattingGeometry.transform(page, box: .cropBox, target: rect))
+            if let ref = page.pageRef { context.drawPDFPage(ref) }
             for annotation in page.annotations where annotation.shouldDisplay && !AnnotationMetadata.isContainer(annotation) { annotation.draw(with: .cropBox,in: context) }
             context.restoreGState(); return true
         }

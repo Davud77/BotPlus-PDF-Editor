@@ -248,7 +248,7 @@ struct PDFFormattingEditor: View {
     }
     private var backgroundControls: some View {
         VStack(alignment: .leading, spacing: 12) {
-            ColorPicker(text("Background color", "Цвет фона"), selection: $state.options.color, supportsOpacity: false)
+            ColorPicker(text("Background color", "Цвет фона"), selection: $state.options.color, supportsOpacity: false).disabled(state.options.image != nil)
             opacityControl
             Button(text("Choose image…", "Выбрать изображение…")) {
                 let panel = NSOpenPanel(); panel.allowedContentTypes = [.image]; panel.allowsMultipleSelection = false
@@ -267,7 +267,7 @@ struct PDFFormattingEditor: View {
                 Text(state.options.imageName).font(.caption)
                 Button(text("Use color only", "Только цвет")) { state.options.image = nil; state.options.imageName = "" }
             }
-            Text(text("Color and optional image are inserted behind the original content. Opaque white fills in the original may cover the background.", "Цвет и изображение вставляются за исходным содержимым. Белые непрозрачные заливки исходного PDF могут закрыть фон.")).font(.caption).foregroundStyle(.secondary)
+            Text(text("Color or image is inserted behind the original content. Opaque white fills in the original may cover the background.", "Цвет или изображение вставляется за исходным содержимым. Белые непрозрачные заливки исходного PDF могут закрыть фон.")).font(.caption).foregroundStyle(.secondary)
         }
     }
     private var imageControls: some View {
@@ -306,7 +306,7 @@ private struct PDFFormattingPreview: NSViewRepresentable {
 }
 
 @MainActor
-private enum PDFFormattingGeometry {
+enum PDFFormattingGeometry {
     static func transform(_ page: PDFPage, box: PDFDisplayBox, target: CGRect) -> CGAffineTransform {
         if let ref = page.pageRef { return ref.getDrawingTransform(box == .mediaBox ? .mediaBox : .cropBox, rect: target, rotate: 0, preserveAspectRatio: true) }
         let source = page.bounds(for: box)
@@ -364,8 +364,9 @@ private final class FormattingPreviewView: NSView {
                           width: image.size.width * scale, height: image.size.height * scale)
         NSColor.white.setFill(); rect.fill()
         if previewApplies && request.kind == .background {
-            PDFColorComponents(options.color, opacity: options.opacity).nsColor.setFill(); rect.fill()
-            if let cgImage = options.image { context.saveGState(); context.setAlpha(options.opacity); context.draw(cgImage, in: rect); context.restoreGState() }
+            if let cgImage = options.image {
+                context.saveGState(); context.setAlpha(options.opacity); context.draw(cgImage, in: rect); context.restoreGState()
+            } else { PDFColorComponents(options.color, opacity: options.opacity).nsColor.setFill(); rect.fill() }
         }
         image.draw(in: rect)
         context.saveGState(); context.clip(to: rect)

@@ -1549,12 +1549,14 @@ enum PDFPageBackgroundEngine {
             }
             guard right > left, top > bottom else { throw PDFSourceError.page }
             func component(_ value: Double) -> UInt32 { UInt32((min(1, max(0, value)) * 255).rounded()) }
-            guard let fill = FPDFPageObj_CreateNewRect(left, bottom, right - left, top - bottom) else { throw PDFSourceError.content }
-            guard FPDFPageObj_SetFillColor(fill, component(color.red), component(color.green), component(color.blue), component(color.alpha)) != 0,
-                  FPDFPath_SetDrawMode(fill, FPDF_FILLMODE_WINDING, 0) != 0 else {
-                FPDFPageObj_Destroy(fill); throw PDFSourceError.content
+            if image == nil {
+                guard let fill = FPDFPageObj_CreateNewRect(left, bottom, right - left, top - bottom) else { throw PDFSourceError.content }
+                guard FPDFPageObj_SetFillColor(fill, component(color.red), component(color.green), component(color.blue), component(color.alpha)) != 0,
+                      FPDFPath_SetDrawMode(fill, FPDF_FILLMODE_WINDING, 0) != 0 else {
+                    FPDFPageObj_Destroy(fill); throw PDFSourceError.content
+                }
+                try insert(fill, page: page, index: 0)
             }
-            try insert(fill, page: page, index: 0)
             if let image {
                 let width = image.width, height = image.height
                 guard width > 0, height > 0, width * height <= 40_000_000,
@@ -1580,7 +1582,7 @@ enum PDFPageBackgroundEngine {
                       FPDFImageObj_SetMatrix(object, Double(right - left), 0, 0, Double(top - bottom), Double(left), Double(bottom)) != 0 else {
                     FPDFPageObj_Destroy(object); throw PDFSourceError.content
                 }
-                try insert(object, page: page, index: 1)
+                try insert(object, page: page, index: 0)
             }
         }
         if FPDFPage_CountObjects(page) == 0 {
