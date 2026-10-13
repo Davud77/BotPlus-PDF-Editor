@@ -18,7 +18,7 @@ extension PDFViewer.Coordinator {
 
 @main
 struct NativeChecks {
-    @MainActor static func main() async throws {
+    @MainActor static func main() throws {
         func expect(_ condition: @autoclosure () -> Bool, _ message: String) {
             if !condition() { fatalError("CHECK FAILED: \(message)") }
         }
@@ -28,7 +28,6 @@ struct NativeChecks {
         NSApp.setActivationPolicy(.prohibited)
         try checkRelease12(root: root)
         try checkContentEditor(root: root)
-        try await checkFormatting(root: root)
         if let path = ProcessInfo.processInfo.environment["BOTPLUS_BENCH_PDF"] { try benchmarkRelease12(root: root,path: path) }
 
         let customSymbols: Set<String> = ["botplus.floppy", "botplus.bookmark.plus"]
@@ -300,6 +299,21 @@ struct NativeChecks {
         expect(lightValue > 0.8 && darkValue < 0.3, "theme palette resolves both light and dark appearances")
         coordinator.detach(); pdf.stopEventMonitoring(); window.close()
         print("PASS: rulers, two-finger scrolling, anchored gesture zoom, live text, opacity and callout persistence, drag/resize/delete, page edits, panel invariants")
+        // Preserve AppKit's synchronous entry point for geometry checks. Run
+        // the async formatting suite only after legacy viewport checks finish.
+        let status = FormattingCheckStatus()
+        Task { @MainActor in
+            do { try await checkFormatting(root: root) }
+            catch { status.error = error }
+            status.finished = true
+        }
+        let deadline = Date(timeIntervalSinceNow: 120)
+        while !status.finished && Date() < deadline {
+            RunLoop.current.run(until: Date(timeIntervalSinceNow: 0.01))
+        }
+        expect(status.finished, "async formatting checks finish")
+        if let error = status.error { throw error }
+
     }
 }
 
@@ -1013,4 +1027,10 @@ private func checkFormatting(root: URL) async throws {
     expect(!FileManager.default.fileExists(atPath: tooLarge.path), "failed export removes only its own partial directory")
     coordinator.detach()
     print("PASS: decoration templates/ranges/replacement/persistence, margins validation, vector background ordering/update/removal, PNG/JPEG/TIFF export and rotation")
+}
+
+@MainActor
+private final class FormattingCheckStatus {
+    var finished = false
+    var error: Error?
 }
