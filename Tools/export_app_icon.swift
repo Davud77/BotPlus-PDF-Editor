@@ -8,7 +8,6 @@ struct IconFile {
     let scale: Int
     var pixels: Int { pointSize * scale }
 }
-
 let files = [
     IconFile(filename: "icon_16.png", pointSize: 16, scale: 1),
     IconFile(filename: "icon_16@2x.png", pointSize: 16, scale: 2),
@@ -21,90 +20,77 @@ let files = [
     IconFile(filename: "icon_512.png", pointSize: 512, scale: 1),
     IconFile(filename: "icon_512@2x.png", pointSize: 512, scale: 2)
 ]
-
-let scriptURL = URL(fileURLWithPath: #filePath).standardizedFileURL
-let projectRoot = scriptURL.deletingLastPathComponent().deletingLastPathComponent()
-let outputDirectory = projectRoot.appendingPathComponent("Assets.xcassets/AppIcon.appiconset", isDirectory: true)
-try FileManager.default.createDirectory(at: outputDirectory, withIntermediateDirectories: true)
-
-func color(_ red: CGFloat, _ green: CGFloat, _ blue: CGFloat, _ alpha: CGFloat = 1) -> CGColor {
-    CGColor(red: red, green: green, blue: blue, alpha: alpha)
+let root = URL(fileURLWithPath: #filePath).standardizedFileURL
+    .deletingLastPathComponent().deletingLastPathComponent()
+let branding = root.appendingPathComponent("docs/branding", isDirectory: true)
+let catalog = root.appendingPathComponent("Assets.xcassets/AppIcon.appiconset", isDirectory: true)
+let preview = root.appendingPathComponent("Assets.xcassets/BrandIcon.imageset", isDirectory: true)
+let sourceURL = branding.appendingPathComponent("BrandArtwork.png")
+func error(_ message: String) -> NSError {
+    NSError(domain: "BotPlusIconExporter", code: 1,
+            userInfo: [NSLocalizedDescriptionKey: message])
+}
+guard let source = NSImage(contentsOf: sourceURL),
+      let image = source.cgImage(forProposedRect: nil, context: nil, hints: nil) else {
+    throw error("Cannot read \(sourceURL.path)")
+}
+guard image.width == 1254, image.height == 1254 else {
+    throw error("BrandArtwork.png must be the checked-in 1254 × 1254 master.")
+}
+for directory in [branding, catalog, preview] {
+    try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
 }
 
-func roundedRect(_ rect: CGRect, radius: CGFloat) -> CGPath {
-    CGPath(roundedRect: rect, cornerWidth: radius, cornerHeight: radius, transform: nil)
-}
-
-func renderIcon(size: Int) throws -> Data {
-    guard let bitmap = NSBitmapImageRep(bitmapDataPlanes: nil, pixelsWide: size, pixelsHigh: size,
-                                        bitsPerSample: 8, samplesPerPixel: 4, hasAlpha: true,
-                                        isPlanar: false, colorSpaceName: .deviceRGB,
-                                        bytesPerRow: 0, bitsPerPixel: 0),
+func render(size: Int) throws -> Data {
+    guard let bitmap = NSBitmapImageRep(bitmapDataPlanes: nil, pixelsWide: size,
+              pixelsHigh: size, bitsPerSample: 8, samplesPerPixel: 4, hasAlpha: true,
+              isPlanar: false, colorSpaceName: .deviceRGB, bytesPerRow: 0, bitsPerPixel: 0),
           let graphics = NSGraphicsContext(bitmapImageRep: bitmap) else {
-        throw NSError(domain: "BotPlusIconExporter", code: 1, userInfo: [NSLocalizedDescriptionKey: "Could not create a bitmap context."])
+        throw error("Cannot create a \(size)px bitmap.")
     }
-    let cg = graphics.cgContext
-    NSGraphicsContext.saveGraphicsState()
-    NSGraphicsContext.current = graphics
-    cg.setAllowsAntialiasing(true)
-    cg.setShouldAntialias(true)
-    cg.scaleBy(x: CGFloat(size) / 1024, y: CGFloat(size) / 1024)
-    cg.translateBy(x: 0, y: 1024)
-    cg.scaleBy(x: 1, y: -1)
-
-    cg.setFillColor(color(0.105, 0.115, 0.135))
-    cg.addPath(roundedRect(CGRect(x: 14, y: 14, width: 996, height: 996), radius: 210))
-    cg.fillPath()
-
-    let paper = roundedRect(CGRect(x: 196, y: 112, width: 632, height: 800), radius: 76)
-    cg.setFillColor(color(0.17, 0.19, 0.22)); cg.addPath(paper); cg.fillPath()
-    cg.setStrokeColor(color(0.58, 0.62, 0.69, 0.72)); cg.setLineWidth(18); cg.addPath(paper); cg.strokePath()
-
-    cg.setFillColor(color(0.68, 0.16, 0.20))
-    cg.addPath(roundedRect(CGRect(x: 196, y: 112, width: 330, height: 112), radius: 44)); cg.fillPath()
-    cg.setStrokeColor(color(0.88, 0.27, 0.30)); cg.setLineWidth(12); cg.setLineCap(.round)
-    cg.move(to: CGPoint(x: 264, y: 286)); cg.addLine(to: CGPoint(x: 524, y: 286)); cg.strokePath()
-
-    cg.setStrokeColor(color(0.72, 0.76, 0.82, 0.8)); cg.setLineCap(.butt)
-    for index in 0..<11 {
-        let x = CGFloat(548 + index * 22)
-        let top: CGFloat = index.isMultiple(of: 5) ? 650 : (index.isMultiple(of: 2) ? 666 : 680)
-        cg.setLineWidth(index.isMultiple(of: 5) ? 7 : 4)
-        cg.move(to: CGPoint(x: x, y: top)); cg.addLine(to: CGPoint(x: x, y: 728)); cg.strokePath()
+    let context = graphics.cgContext
+    context.clear(CGRect(x: 0, y: 0, width: size, height: size))
+    context.scaleBy(x: CGFloat(size) / 1024, y: CGFloat(size) / 1024)
+    context.interpolationQuality = .high
+    context.setAllowsAntialiasing(true)
+    context.setShouldAntialias(true)
+    // Normalize the artwork to the macOS icon grid. A deterministic rounded
+    // silhouette excludes extraction flecks while retaining the source alpha.
+    let tile = CGRect(x: 72, y: 72, width: 880, height: 880)
+    context.addPath(CGPath(roundedRect: tile, cornerWidth: 128, cornerHeight: 128,
+                          transform: nil))
+    context.clip()
+    let ratio: CGFloat = 880 / 1008
+    let inset: CGFloat = 72 - 122 * ratio
+    context.draw(image, in: CGRect(x: inset, y: inset,
+                                  width: 1254 * ratio, height: 1254 * ratio))
+    guard let png = bitmap.representation(using: .png, properties: [:]) else {
+        throw error("Cannot encode PNG.")
     }
-    cg.setStrokeColor(color(0.72, 0.76, 0.82, 0.72)); cg.setLineWidth(5)
-    cg.move(to: CGPoint(x: 548, y: 728)); cg.addLine(to: CGPoint(x: 782, y: 728)); cg.strokePath()
-
-    let badge = roundedRect(CGRect(x: 270, y: 352, width: 484, height: 360), radius: 76)
-    cg.setFillColor(color(0, 0, 0, 0.27)); cg.addPath(roundedRect(CGRect(x: 270, y: 368, width: 484, height: 360), radius: 76)); cg.fillPath()
-    cg.setFillColor(color(0.25, 0.29, 0.35)); cg.addPath(badge); cg.fillPath()
-    cg.setStrokeColor(color(1, 1, 1, 0.14)); cg.setLineWidth(5); cg.addPath(badge); cg.strokePath()
-
-    // Draw a geometric B and plus sign so the exported icon has no font dependency.
-    cg.setStrokeColor(color(0.94, 0.95, 0.97)); cg.setLineWidth(44); cg.setLineCap(.round); cg.setLineJoin(.round)
-    cg.move(to: CGPoint(x: 414, y: 620)); cg.addLine(to: CGPoint(x: 414, y: 444)); cg.strokePath()
-    cg.setLineWidth(36)
-    cg.addPath(roundedRect(CGRect(x: 414, y: 536, width: 84, height: 84), radius: 28)); cg.strokePath()
-    cg.addPath(roundedRect(CGRect(x: 414, y: 444, width: 94, height: 92), radius: 30)); cg.strokePath()
-    cg.setStrokeColor(color(0.94, 0.95, 0.97)); cg.setLineWidth(28)
-    cg.move(to: CGPoint(x: 608, y: 542)); cg.addLine(to: CGPoint(x: 704, y: 542)); cg.strokePath()
-    cg.move(to: CGPoint(x: 656, y: 494)); cg.addLine(to: CGPoint(x: 656, y: 590)); cg.strokePath()
-
-    NSGraphicsContext.restoreGraphicsState()
-    guard let data = bitmap.representation(using: .png, properties: [:]) else {
-        throw NSError(domain: "BotPlusIconExporter", code: 2, userInfo: [NSLocalizedDescriptionKey: "Could not encode PNG data."])
-    }
-    return data
+    return png
 }
-
+func writeJSON(_ object: [String: Any], to url: URL) throws {
+    let data = try JSONSerialization.data(withJSONObject: object,
+                                          options: [.prettyPrinted, .sortedKeys])
+    try data.write(to: url, options: .atomic)
+}
 for file in files {
-    try renderIcon(size: file.pixels).write(to: outputDirectory.appendingPathComponent(file.filename), options: .atomic)
+    try render(size: file.pixels).write(to: catalog.appendingPathComponent(file.filename),
+                                       options: .atomic)
 }
-
-let images: [[String: String]] = files.map { file in
-    ["filename": file.filename, "idiom": "mac", "scale": "\(file.scale)x", "size": "\(file.pointSize)x\(file.pointSize)"]
-}
-let contents: [String: Any] = ["images": images, "info": ["author": "xcode", "version": 1]]
-let json = try JSONSerialization.data(withJSONObject: contents, options: [.prettyPrinted, .sortedKeys])
-try json.write(to: outputDirectory.appendingPathComponent("Contents.json"), options: .atomic)
-print("Wrote 10 AppIcon PNG variants and Contents.json to \(outputDirectory.path)")
+try render(size: 1024).write(to: branding.appendingPathComponent("AppIcon.png"), options: .atomic)
+try render(size: 512).write(to: preview.appendingPathComponent("BrandIcon.png"), options: .atomic)
+try render(size: 1024).write(to: preview.appendingPathComponent("BrandIcon@2x.png"), options: .atomic)
+try writeJSON([
+    "images": files.map { ["filename": $0.filename, "idiom": "mac",
+                            "scale": "\($0.scale)x", "size": "\($0.pointSize)x\($0.pointSize)"] },
+    "info": ["author": "xcode", "version": 1]
+], to: catalog.appendingPathComponent("Contents.json"))
+try writeJSON([
+    "images": [
+        ["filename": "BrandIcon.png", "idiom": "mac", "scale": "1x"],
+        ["filename": "BrandIcon@2x.png", "idiom": "mac", "scale": "2x"]
+    ],
+    "info": ["author": "xcode", "version": 1]
+], to: preview.appendingPathComponent("Contents.json"))
+print("Exported AppIcon.png, all 10 macOS AppIcon sizes, and BrandIcon preview assets.")

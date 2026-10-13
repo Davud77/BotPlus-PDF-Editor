@@ -1,5 +1,7 @@
 # BotPlus PDF Editor
 
+<img src="docs/branding/AppIcon.png" width="128" height="128" alt="BotPlus PDF Editor logo">
+
 [![macOS 14+](https://img.shields.io/badge/macOS-14%2B-000000?logo=apple)](https://www.apple.com/macos/)
 [![AGPL-3.0](https://img.shields.io/badge/license-AGPL--3.0-blue)](LICENSE)
 [![Swift 6](https://img.shields.io/badge/Swift-6-F05138?logo=swift&logoColor=white)](https://www.swift.org/)
@@ -58,19 +60,27 @@ xcodebuild -project BotPlusPDFEditor.xcodeproj \
 
 The UI and PDFKit coordinator are in `ContentView.swift`; source-text editing is in `PDFiumSourceEditor.swift`, the in-page editor and properties panel in `PDFTextEditingUI.swift`, with a small C save bridge in `Native/PDFiumBridge`. The Xcode project includes the icon asset catalog and sandbox entitlements.
 
+## Opening PDFs from Finder
+
+The AppKit application delegate handles double-click, Open With, and Dock file
+drops. Early launch events are queued until the workspace is ready. Reopening a
+PDF selects its existing tab; closing the workspace does not discard subsequent
+file-open events. SwiftUI remains hosted in NSHostingView, without a SwiftUI App
+entry point or app-defined AppIntents.
+
 ## App icon
 
-`AppIcon.svg` is the editable 1024 × 1024 vector master. `AppIconPreviewView` in `ContentView.swift` draws the mark using SwiftUI Canvas. To regenerate the standard macOS PNG icon set with Apple’s AppKit renderer:
+`docs/branding/AppIcon.png` is the transparent 1024 × 1024 app logo based on the supplied burgundy PDF artwork. `AppIconPreviewView` uses the same bundled `BrandIcon` image in the title bar and About dialog. To regenerate the standard macOS PNG icon set with Apple’s AppKit renderer:
 
 ```sh
 swift Tools/export_app_icon.swift
 ```
 
-This writes PNGs and `Contents.json` into `Assets.xcassets/AppIcon.appiconset`, already connected to the Xcode target. You can also open `AppIcon.svg` in a vector editor and export the standard icon sizes.
+This writes PNGs and `Contents.json` into `Assets.xcassets/AppIcon.appiconset` and `BrandIcon.imageset`, already connected to the Xcode target. See [branding sources and export notes](docs/branding/README.md). The previous vector logo is archived as `docs/branding/AppIcon-legacy.svg`.
 
 ## Runtime notes
 
-The app defines no AppIntents types or shortcut declarations. Xcode may still invoke its metadata scanner for an application target; the scanner reports that extraction was skipped because AppIntents.framework is not linked. Live Text interaction is disabled at runtime when the installed PDFKit exposes its setter. Viewport-to-SwiftUI state synchronization is deferred until after AppKit updates complete to avoid publishing ObservableObject changes during representable updates. Errors from macOS services such as `linkd.autoShortcut`, and PDFKit OCR model availability diagnostics, depend on the host runtime and cannot be suppressed by app code when those system services are unavailable.
+The app defines no AppIntents types or shortcut declarations. Xcode may still invoke its metadata scanner for an application target; the scanner reports that extraction was skipped because AppIntents.framework is not linked. No private Live Text setter is used. PDFKit may still invoke system OCR when selecting or searching text. Viewport-to-SwiftUI state synchronization is deferred until after AppKit updates complete to avoid publishing ObservableObject changes during representable updates. Errors from macOS services such as `linkd.autoShortcut`, and PDFKit OCR model availability diagnostics, depend on the host runtime and cannot be suppressed by app code when those system services are unavailable.
 
 ## Workspace and editing
 

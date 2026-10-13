@@ -24,5 +24,7 @@
 		<string>ru</string>
 		<string>en</string>
 	</array>
+	<key>CFBundleName</key>
+	<string>BotPlus PDF Editor</string>
 </dict>
 </plist>

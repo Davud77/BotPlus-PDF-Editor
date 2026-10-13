@@ -851,7 +851,8 @@ private extension DocumentManager {
     }
     func refreshClipboard() {
         let board = NSPasteboard.general
-        clipboardAvailable = board.availableType(from: [ObjectClipboard.contentObject,ObjectClipboard.annotations,ObjectClipboard.sourceText,.string]) != nil
+        let available = board.availableType(from: [ObjectClipboard.contentObject,ObjectClipboard.annotations,ObjectClipboard.sourceText,.string]) != nil
+        if clipboardAvailable != available { clipboardAvailable = available }
     }
 }
 
@@ -874,25 +875,178 @@ private struct RibbonGroupSpec: Identifiable {
     }
 }
 
+// AppKit owns the application lifecycle and Finder Apple Events. SwiftUI is
+// used exclusively for the hosted workspace, without SwiftUI App discovery.
 @main
-struct BotPlusPDFEditorApp: App {
-    var body: some Scene {
-        WindowGroup(BotPlusBrand.name) {
-            ContentView().frame(minWidth: 1060, minHeight: 700)
-        }
-        .windowStyle(.hiddenTitleBar)
-        .commands {
-            CommandGroup(replacing: .newItem) { }
-            CommandGroup(after: .newItem) {
-                Button("Open PDF…") { NotificationCenter.default.post(name: .requestOpenPDF, object: nil) }
-                    .keyboardShortcut("o", modifiers: .command)
-            }
-        }
+@MainActor
+struct BotPlusPDFEditorApp {
+    static func main() {
+        let application = NSApplication.shared
+        let delegate = BotPlusAppDelegate()
+        application.delegate = delegate
+        application.setActivationPolicy(.regular)
+        withExtendedLifetime(delegate) { application.run() }
     }
 }
 
-private extension Notification.Name {
-    static let requestOpenPDF = Notification.Name("BotPlusPDFEditor.requestOpenPDF")
+@MainActor
+private final class BotPlusAppDelegate: NSObject, NSApplicationDelegate, NSMenuItemValidation {
+    let manager = DocumentManager()
+    private var workspace: NSWindow?
+    private var pendingURLs: [URL] = []
+    private var launched = false
+
+    func applicationDidFinishLaunching(_ notification: Notification) {
+        launched = true
+        rebuildMenus()
+        showWorkspace()
+        let urls = pendingURLs
+        pendingURLs.removeAll()
+        receive(urls)
+    }
+
+    // Finder double-click, Open With, multiple-file selection and Dock drops
+    // all arrive here, including before applicationDidFinishLaunching.
+    func application(_ application: NSApplication, open urls: [URL]) {
+        guard launched else { pendingURLs.append(contentsOf: urls); return }
+        receive(urls)
+    }
+
+    private func receive(_ urls: [URL]) {
+        guard !urls.isEmpty else { return }
+        showWorkspace()
+        // Defer model publication until after Apple Event/window processing.
+        DispatchQueue.main.async { [weak self] in
+            guard let self else { return }
+            for url in urls where url.isFileURL { self.manager.openAsync(url) }
+        }
+    }
+
+    func applicationShouldHandleReopen(_ sender: NSApplication, hasVisibleWindows flag: Bool) -> Bool {
+        showWorkspace()
+        return false
+    }
+
+    func applicationShouldTerminateAfterLastWindowClosed(_ sender: NSApplication) -> Bool { false }
+
+    private func showWorkspace() {
+        if workspace == nil {
+            let window = NSWindow(contentRect: CGRect(x: 0, y: 0, width: 1380, height: 880),
+                styleMask: [.titled, .closable, .miniaturizable, .resizable, .fullSizeContentView],
+                backing: .buffered, defer: false)
+            window.title = BotPlusBrand.name
+            window.titleVisibility = .hidden
+            window.titlebarAppearsTransparent = true
+            window.isReleasedWhenClosed = false
+            window.contentMinSize = NSSize(width: 1060, height: 700)
+            window.contentView = NSHostingView(rootView: ContentView(manager: manager)
+                .frame(minWidth: 1060, minHeight: 700))
+            window.center()
+            window.setFrameAutosaveName("BotPlusWorkspace")
+            workspace = window
+        }
+        if workspace?.isMiniaturized == true { workspace?.deminiaturize(nil) }
+        workspace?.makeKeyAndOrderFront(nil)
+        NSApp.activate()
+    }
+
+    func rebuildMenus() {
+        let main = NSMenu()
+        func menu(_ title: String) -> NSMenu {
+            let item = NSMenuItem(title: title, action: nil, keyEquivalent: "")
+            let submenu = NSMenu(title: title)
+            item.submenu = submenu; main.addItem(item)
+            return submenu
+        }
+        func text(_ en: String, _ ru: String) -> String { manager.language == .ru ? ru : en }
+        func command(_ menu: NSMenu, _ en: String, _ ru: String, _ key: String,
+                     _ action: RibbonAction, shift: Bool = false) {
+            let item = NSMenuItem(title: text(en, ru), action: #selector(runCommand(_:)), keyEquivalent: key)
+            item.target = self; item.representedObject = action
+            item.keyEquivalentModifierMask = shift ? [.command, .shift] : [.command]
+            menu.addItem(item)
+        }
+        func responder(_ menu: NSMenu, _ en: String, _ ru: String, _ key: String, _ selector: Selector) {
+            menu.addItem(NSMenuItem(title: text(en, ru), action: selector, keyEquivalent: key))
+        }
+        let app = menu(BotPlusBrand.name)
+        command(app, "About BotPlus PDF Editor", "О программе BotPlus PDF Editor", "", .about)
+        command(app, "Settings…", "Настройки…", ",", .settings)
+        app.addItem(.separator())
+        let services = NSMenu(title: text("Services", "Службы"))
+        let servicesItem = NSMenuItem(title: services.title, action: nil, keyEquivalent: "")
+        servicesItem.submenu = services; app.addItem(servicesItem); NSApp.servicesMenu = services
+        app.addItem(.separator())
+        responder(app, "Hide BotPlus PDF Editor", "Скрыть BotPlus PDF Editor", "h", #selector(NSApplication.hide(_:)))
+        let hideOthers = NSMenuItem(title: text("Hide Others", "Скрыть остальные"), action: #selector(NSApplication.hideOtherApplications(_:)), keyEquivalent: "h")
+        hideOthers.keyEquivalentModifierMask = [.command, .option]; app.addItem(hideOthers)
+        responder(app, "Show All", "Показать все", "", #selector(NSApplication.unhideAllApplications(_:)))
+        app.addItem(.separator())
+        responder(app, "Quit BotPlus PDF Editor", "Завершить BotPlus PDF Editor", "q", #selector(NSApplication.terminate(_:)))
+        let file = menu(text("File", "Файл"))
+        command(file, "New Blank PDF", "Создать пустой PDF", "n", .feature("blank"))
+        command(file, "Open PDF…", "Открыть PDF…", "o", .open)
+        file.addItem(.separator())
+        command(file, "Save", "Сохранить", "s", .save)
+        command(file, "Save As…", "Сохранить как…", "s", .saveAs, shift: true)
+        command(file, "Print…", "Печать…", "p", .print)
+        responder(file, "Close Window", "Закрыть окно", "w", #selector(NSWindow.performClose(_:)))
+        let edit = menu(text("Edit", "Правка"))
+        command(edit, "Undo", "Отменить", "z", .feature("undo"))
+        command(edit, "Redo", "Повторить", "z", .feature("redo"), shift: true)
+        edit.addItem(.separator())
+        command(edit, "Cut", "Вырезать", "x", .cut)
+        command(edit, "Copy", "Копировать", "c", .copy)
+        command(edit, "Paste", "Вставить", "v", .paste)
+        responder(edit, "Select All", "Выделить всё", "a", #selector(NSText.selectAll(_:)))
+        let window = menu(text("Window", "Окно"))
+        responder(window, "Minimize", "Свернуть", "m", #selector(NSWindow.performMiniaturize(_:)))
+        responder(window, "Zoom", "Развернуть", "", #selector(NSWindow.performZoom(_:)))
+        window.addItem(.separator())
+        responder(window, "Bring All to Front", "Все окна на передний план", "", #selector(NSApplication.arrangeInFront(_:)))
+        NSApp.windowsMenu = window
+        let help = menu(text("Help", "Помощь"))
+        command(help, "Support", "Поддержка", "", .support)
+        command(help, "Telegram", "Телеграм", "", .telegram)
+        NSApp.helpMenu = help
+        NSApp.mainMenu = main
+    }
+
+    private var commandManager: DocumentManager {
+        PDFWindowPool.shared.manager(for: NSApp.keyWindow) ?? manager
+    }
+
+    @objc private func runCommand(_ sender: NSMenuItem) {
+        guard let action = sender.representedObject as? RibbonAction else { return }
+        if let editor = NSApp.keyWindow?.firstResponder as? NSTextView {
+            switch action {
+            case .copy: editor.copy(sender); return
+            case .cut: editor.cut(sender); return
+            case .paste: editor.paste(sender); return
+            case .feature("undo") where editor.undoManager?.canUndo == true: editor.undoManager?.undo(); return
+            case .feature("redo") where editor.undoManager?.canRedo == true: editor.undoManager?.redo(); return
+            default: break
+            }
+        }
+        let active = commandManager
+        active.refreshClipboard()
+        active.perform(action)
+    }
+
+    func validateMenuItem(_ item: NSMenuItem) -> Bool {
+        guard let action = item.representedObject as? RibbonAction else { return true }
+        if let editor = NSApp.keyWindow?.firstResponder as? NSTextView {
+            switch action {
+            case .copy: return editor.selectedRange().length > 0
+            case .cut: return editor.isEditable && editor.selectedRange().length > 0
+            case .paste: return editor.isEditable && NSPasteboard.general.canReadItem(withDataConformingToTypes: [UTType.text.identifier])
+            case .feature("undo") where editor.undoManager?.canUndo == true: return true
+            case .feature("redo") where editor.undoManager?.canRedo == true: return true
+            default: break
+            }
+        }
+        return commandManager.canPerform(action)
+    }
 }
 
 @MainActor
@@ -920,11 +1074,13 @@ private struct ContentView: View {
         .ignoresSafeArea(.container, edges: .top)
         .onAppear { manager.refreshClipboard() }
         .onReceive(NotificationCenter.default.publisher(for: NSApplication.didBecomeActiveNotification)) { _ in manager.refreshClipboard() }
-        .onReceive(NotificationCenter.default.publisher(for: .requestOpenPDF)) { _ in manager.openPanel() }
         .onReceive(manager.panels.$configurations) { _ in
             manager.panels.synchronizeFloatingWindows(manager: manager)
         }
-        .onChange(of: manager.language) { _, _ in manager.panels.synchronizeFloatingWindows(manager: manager) }
+        .onChange(of: manager.language) { _, _ in
+            manager.panels.synchronizeFloatingWindows(manager: manager)
+            DispatchQueue.main.async { (NSApp.delegate as? BotPlusAppDelegate)?.rebuildMenus() }
+        }
         .onChange(of: manager.theme) { _, _ in manager.panels.synchronizeFloatingWindows(manager: manager) }
         .sheet(isPresented: $manager.isAboutPresented) { AboutDialog(manager: manager) }
         .sheet(isPresented: $manager.isLicensePresented) { LicenseDialog(manager: manager) }
@@ -990,51 +1146,14 @@ private struct WindowChromeConfigurator: NSViewRepresentable {
     }
 }
 
-/// Scalable, dependency-free rendering of the BotPlus application mark.
+/// Uses the same artwork as the Dock/Finder icon from the bundled asset catalog.
 struct AppIconPreviewView: View {
     var body: some View {
-        Canvas { context, size in
-            var canvas = context
-            canvas.scaleBy(x: size.width / 1024, y: size.height / 1024)
-            let full = CGRect(x: 0, y: 0, width: 1024, height: 1024)
-            canvas.fill(Path(roundedRect: full.insetBy(dx: 14, dy: 14), cornerRadius: 210), with: .color(Color(red: 0.105, green: 0.115, blue: 0.135)))
-
-            let document = Path(roundedRect: CGRect(x: 196, y: 112, width: 632, height: 800), cornerRadius: 76)
-            canvas.fill(document, with: .linearGradient(Gradient(colors: [Color(red: 0.19, green: 0.21, blue: 0.24), Color(red: 0.115, green: 0.13, blue: 0.155)]), startPoint: CGPoint(x: 280, y: 120), endPoint: CGPoint(x: 750, y: 900)))
-            canvas.stroke(document, with: .color(Color(red: 0.58, green: 0.62, blue: 0.69).opacity(0.72)), lineWidth: 18)
-            let tab = Path(roundedRect: CGRect(x: 196, y: 112, width: 330, height: 112), cornerRadius: 44)
-            canvas.fill(tab, with: .color(Color(red: 0.68, green: 0.16, blue: 0.20)))
-            var accent = Path()
-            accent.move(to: CGPoint(x: 264, y: 286)); accent.addLine(to: CGPoint(x: 524, y: 286))
-            canvas.stroke(accent, with: .color(Color(red: 0.88, green: 0.27, blue: 0.30)), style: StrokeStyle(lineWidth: 12, lineCap: .round))
-
-            // Drafting ticks across the lower-right corner of the sheet.
-            for index in 0..<11 {
-                let x = CGFloat(548 + index * 22)
-                let top: CGFloat = index.isMultiple(of: 5) ? 650 : (index.isMultiple(of: 2) ? 666 : 680)
-                var tick = Path(); tick.move(to: CGPoint(x: x, y: top)); tick.addLine(to: CGPoint(x: x, y: 728))
-                canvas.stroke(tick, with: .color(Color(red: 0.72, green: 0.76, blue: 0.82).opacity(0.8)), lineWidth: index.isMultiple(of: 5) ? 7 : 4)
-            }
-            var baseline = Path(); baseline.move(to: CGPoint(x: 548, y: 728)); baseline.addLine(to: CGPoint(x: 782, y: 728))
-            canvas.stroke(baseline, with: .color(Color(red: 0.72, green: 0.76, blue: 0.82).opacity(0.72)), lineWidth: 5)
-
-            let badge = Path(roundedRect: CGRect(x: 270, y: 352, width: 484, height: 360), cornerRadius: 76)
-            canvas.fill(badge.offsetBy(dx: 0, dy: 16), with: .color(.black.opacity(0.28)))
-            canvas.fill(badge, with: .linearGradient(Gradient(colors: [Color(red: 0.28, green: 0.32, blue: 0.38), Color(red: 0.16, green: 0.19, blue: 0.24)]), startPoint: CGPoint(x: 300, y: 350), endPoint: CGPoint(x: 720, y: 720)))
-            canvas.stroke(badge, with: .color(Color.white.opacity(0.14)), lineWidth: 5)
-            let markColor = Color(red: 0.94, green: 0.95, blue: 0.97)
-            var stem = Path(); stem.move(to: CGPoint(x: 414, y: 620)); stem.addLine(to: CGPoint(x: 414, y: 444))
-            canvas.stroke(stem, with: .color(markColor), style: StrokeStyle(lineWidth: 44, lineCap: .round))
-            let upperBowl = Path(roundedRect: CGRect(x: 414, y: 444, width: 94, height: 92), cornerRadius: 30)
-            let lowerBowl = Path(roundedRect: CGRect(x: 414, y: 536, width: 84, height: 84), cornerRadius: 28)
-            canvas.stroke(upperBowl, with: .color(markColor), style: StrokeStyle(lineWidth: 36, lineCap: .round, lineJoin: .round))
-            canvas.stroke(lowerBowl, with: .color(markColor), style: StrokeStyle(lineWidth: 36, lineCap: .round, lineJoin: .round))
-            var plus = Path(); plus.move(to: CGPoint(x: 608, y: 542)); plus.addLine(to: CGPoint(x: 704, y: 542))
-            plus.move(to: CGPoint(x: 656, y: 494)); plus.addLine(to: CGPoint(x: 656, y: 590))
-            canvas.stroke(plus, with: .color(markColor), style: StrokeStyle(lineWidth: 28, lineCap: .round))
-        }
-        .aspectRatio(1, contentMode: .fit)
-        .accessibilityLabel("BotPlus PDF Editor app icon")
+        Image("BrandIcon")
+            .resizable()
+            .interpolation(.high)
+            .scaledToFit()
+            .accessibilityLabel("BotPlus PDF Editor app icon")
     }
 }
 
@@ -2347,7 +2466,7 @@ private struct PDFViewer: NSViewRepresentable {
                 self.changeContent(index: info.index,pageIndex: index,bounds: properties.bounds,rotation: properties.rotation*CGFloat.pi/180,style: properties.style,item: item,view: view)
             }
             properties.delete = { [weak self,weak view] in guard let self,let view else { return }; self.deleteContent(view) }
-            properties.replace = { [weak self,weak view] in
+            properties.replace = { [weak self,weak view,weak item] in
                 guard let self,let view else { return }
                 PDFDialogs.open([.image]) { [weak self,weak view,weak item] urls in
                     guard let self,let view,let item,item.document === expected,let url = urls.first else { return }
@@ -4082,12 +4201,24 @@ private extension PDFViewerView {
 private final class PDFWindowPool: NSObject,NSWindowDelegate {
     static let shared = PDFWindowPool()
     private var windows: [NSWindow] = []
+    private var managers: [ObjectIdentifier: DocumentManager] = [:]
+    func manager(for window: NSWindow?) -> DocumentManager? {
+        guard let window else { return nil }
+        return managers[ObjectIdentifier(window)]
+    }
     func open() {
         let window = NSWindow(contentRect: CGRect(x: 80,y: 80,width: 1280,height: 820),styleMask: [.titled,.closable,.miniaturizable,.resizable,.fullSizeContentView],backing: .buffered,defer: false)
-        window.contentView = NSHostingView(rootView: ContentView().frame(minWidth: 1060,minHeight: 700)); window.title = BotPlusBrand.name; window.isReleasedWhenClosed = false; window.delegate = self
+        let manager = DocumentManager()
+        managers[ObjectIdentifier(window)] = manager
+        window.contentView = NSHostingView(rootView: ContentView(manager: manager).frame(minWidth: 1060,minHeight: 700)); window.title = BotPlusBrand.name; window.isReleasedWhenClosed = false; window.delegate = self
         windows.append(window); window.makeKeyAndOrderFront(nil)
     }
-    func windowWillClose(_ notification: Notification) { if let window = notification.object as? NSWindow { windows.removeAll { $0 === window } } }
+    func windowWillClose(_ notification: Notification) {
+        if let window = notification.object as? NSWindow {
+            windows.removeAll { $0 === window }
+            managers.removeValue(forKey: ObjectIdentifier(window))
+        }
+    }
 }
 
 @MainActor

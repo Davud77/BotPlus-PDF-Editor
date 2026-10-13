@@ -1,5 +1,7 @@
 # BotPlus PDF Editor
 
+<img src="docs/branding/AppIcon.png" width="128" height="128" alt="BotPlus PDF Editor logo">
+
 [![macOS 14+](https://img.shields.io/badge/macOS-14%2B-000000?logo=apple)](https://www.apple.com/macos/)
 [![AGPL-3.0](https://img.shields.io/badge/license-AGPL--3.0-blue)](LICENSE)
 [![Swift 6](https://img.shields.io/badge/Swift-6-F05138?logo=swift&logoColor=white)](https://www.swift.org/)
@@ -9,6 +11,14 @@
 Нативный PDF-редактор для macOS и Apple Silicon. Ленточный интерфейс, боковые панели и инструменты аннотаций вдохновлены удобством PDF-XChange Editor. Интерфейс и просмотр построены на SwiftUI, AppKit и Apple PDFKit; исходный текст изменяется через встроенный PDFium; интерфейс переключается между русским и английским языками.
 
 [Скачать актуальный DMG](https://github.com/Davud77/BotPlus-PDF-Editor/releases/latest/download/BotPlus-PDF-Editor.dmg) · [Релизы](https://github.com/Davud77/BotPlus-PDF-Editor/releases) · [Telegram](https://t.me/botplus_pdf) · [English README](README.en.md)
+
+## Открытие из Finder
+
+Двойной клик, «Открыть с помощью» и перенос PDF на значок в Dock обрабатываются
+нативным делегатом AppKit. Файлы, полученные до появления окна, сохраняются в
+очередь; повторное открытие переключает существующую вкладку. Главное окно
+возвращается и после закрытия. Сборка использует AppKit lifecycle и SwiftUI
+NSHostingView; AppIntents в коде не подключается.
 
 ## Стартовый экран
 
@@ -118,7 +128,7 @@ swift Tools/export_app_icon.swift
 
 Нативные проверки включают замену исходного текста с поиском после повторного открытия, кириллицу, удаление, вставку, сохранение векторной графики, копирование объектов и обе темы. Они также охватывают преобразование координат и поворот страниц, прокрутку и масштабирование, сохранение аннотаций и прозрачности, выноски, перемещение/изменение размера/удаление, операции со страницами и состояние панелей. Временные PDF создаются отдельно от пользовательских документов.
 
-`AppIcon.svg` — векторный исходник 1024 × 1024. `AppIconPreviewView` рисует знак средствами SwiftUI Canvas; скрипт экспортирует PNG в `Assets.xcassets/AppIcon.appiconset`.
+`docs/branding/AppIcon.png` — новый логотип на основе предоставленного изображения: бордовая плитка, стопка PDF и панель редактирования. PNG 1024 × 1024 имеет прозрачные края. `AppIconPreviewView` использует тот же знак из `BrandIcon.imageset` в верхней панели и окне «О программе». Скрипт экспортирует все 10 размеров в `Assets.xcassets/AppIcon.appiconset`. Подробности и исходник — в [docs/branding](docs/branding/README.md); прежний векторный знак сохранён как `AppIcon-legacy.svg`.
 
 ## Поддержка
 
