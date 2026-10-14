@@ -202,7 +202,7 @@ final class AppUpdateController: ObservableObject {
     private let defaults: UserDefaults
     let installed: String
     @Published var automaticChecks: Bool { didSet { defaults.set(automaticChecks,forKey: "BotPlus.update.checks") } }
-    @Published var automaticInstall: Bool { didSet { defaults.set(automaticInstall,forKey: "BotPlus.update.install"); if !automaticInstall { disarm() }; if automaticInstall, let release, policy.shouldNotify(version: release.tag_name,installed: installed) { download() } } }
+    @Published var automaticInstall: Bool { didSet { defaults.set(automaticInstall,forKey: "BotPlus.update.install"); if !automaticInstall { disarm() }; if automaticInstall, let release, policy.shouldNotify(version: release.tag_name,installed: installed) { if staged != nil { armUsingBookmark() } else { download() } } } }
     @Published private(set) var policy: UpdatePolicy
     @Published private(set) var checking = false
     @Published private(set) var release: ReleaseUpdate?
@@ -211,7 +211,7 @@ final class AppUpdateController: ObservableObject {
     @Published private(set) var staged: URL?
     @Published private(set) var installationArmed = false
     @Published private(set) var installing = false
-    var onAvailable: (() -> Void)?
+    var onAvailable: (() -> Bool)?
     private var task: Task<Void,Never>?
     private var schedule: Task<Void,Never>?
     private var lease: URL?
@@ -249,15 +249,15 @@ final class AppUpdateController: ObservableObject {
                 guard !candidate.draft, !candidate.prerelease, candidate.pageURL != nil else { throw URLError(.cannotParseResponse) }
                 if release?.tag_name != candidate.tag_name { clearStaging() }; release = candidate
                 if policy.shouldNotify(version: candidate.tag_name,installed: installed) {
-                    if !manual && notifiedVersion != candidate.tag_name { notifiedVersion = candidate.tag_name; onAvailable?() }
+                    if !manual && notifiedVersion != candidate.tag_name, onAvailable?() == true { notifiedVersion = candidate.tag_name }
                     if automaticInstall { DispatchQueue.main.async { if self.automaticInstall && self.policy.shouldNotify(version: candidate.tag_name,installed: self.installed) { self.download() } } }
                 }
             } catch is CancellationError { }
             catch { if Task.isCancelled { return }; self.error = "Не удалось проверить релиз. Проверьте сеть / Could not check release. Check your connection" }
         }
     }
-    func skip() { guard let release else { return }; cancel(); clearStaging(); policy.skipped = release.tag_name; defaults.set(policy.skipped,forKey: "BotPlus.update.skipped") }
-    func snooze() { cancel(); clearStaging(); policy.snoozedUntil = UpdatePolicy.month(after: Date()); defaults.set(policy.snoozedUntil,forKey: "BotPlus.update.snooze") }
+    func skip() { guard let release else { return }; notifiedVersion = nil; cancel(); clearStaging(); policy.skipped = release.tag_name; defaults.set(policy.skipped,forKey: "BotPlus.update.skipped") }
+    func snooze() { notifiedVersion = nil; cancel(); clearStaging(); policy.snoozedUntil = UpdatePolicy.month(after: Date()); defaults.set(policy.snoozedUntil,forKey: "BotPlus.update.snooze") }
     func resetSuppression() { notifiedVersion = nil; policy = UpdatePolicy(); defaults.removeObject(forKey: "BotPlus.update.skipped"); defaults.removeObject(forKey: "BotPlus.update.snooze") }
     func cancel() { task?.cancel() }
     private func clearStaging() {

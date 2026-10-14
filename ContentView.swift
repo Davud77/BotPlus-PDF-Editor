@@ -966,8 +966,9 @@ private final class BotPlusAppDelegate: NSObject, NSApplicationDelegate, NSMenuI
             UserDefaults.standard.removeObject(forKey: "BotPlus.update.pendingFiles"); receive(files)
         }
         AppUpdateController.shared.onAvailable = { [weak self] in
-            guard let self, self.workspace?.attachedSheet == nil else { return }
+            guard let self, self.workspace?.isVisible == true, self.workspace?.attachedSheet == nil else { return false }
             self.manager.isUpdatePresented = true
+            return true
         }
         AppUpdateController.shared.start()
     }
