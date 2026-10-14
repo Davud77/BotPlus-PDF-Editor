@@ -269,6 +269,12 @@ struct NativeChecks {
         coordinator.checkCommand(.page(0),view: pdf)
         let centeredRect = pdf.convert(item.document.page(at: 0)!.bounds(for: .cropBox),from: item.document.page(at: 0)!)
         expect(abs(centeredRect.midY-pdf.bounds.midY) < 2,"thumbnail navigation centers a short page vertically")
+        expect(pdf.pageBreakMargins.top == 2 && pdf.pageBreakMargins.bottom == 2,"short-page centering does not enlarge per-page margins")
+        if item.pageCount > 1 {
+            let nextRect = pdf.convert(item.document.page(at: 1)!.bounds(for: .cropBox),from: item.document.page(at: 1)!)
+            let gap = abs(centeredRect.midY-nextRect.midY)-(centeredRect.height+nextRect.height)/2
+            expect(gap < 20,"adjacent pages remain compact when a short first page is centered")
+        }
 
         // Use an isolated pasteboard, preserving the user's clipboard.
         let board = NSPasteboard.withUniqueName()

@@ -1368,7 +1368,7 @@ private struct RibbonView: View {
             ])]
         case .home:
             return [
-                RibbonGroupSpec("tools", "Tools", "Инструменты", [tool("hand", "Hand", "Рука", "hand.raised", .hand), tool("text", "Select Text", "Выделить текст", "text.cursor", .textSelection), tool("selectComments", "Select Comments", "Выделить комментарии", "cursorarrow", .selectComments)]),
+                RibbonGroupSpec("tools", "Tools", "Инструменты", [tool("hand", "Hand", "Рука", "hand.raised", .hand), tool("text", "Select Text", "Выделить текст", "text.cursor", .textSelection), tool("selectComments", "Select Comments", "Выделить комментарии", "cursorarrow", .selectComments), tool("snapshot", "Snapshot", "Снимок", "camera.viewfinder", .snapshot)]),
                 RibbonGroupSpec("view", "View", "Вид", [RibbonCommand("zoomOut", "Zoom Out", "Уменьшить", "minus.magnifyingglass", .zoomOut), RibbonCommand("actual", "Actual Size 1:1", "Реальный размер 1:1", "1.magnifyingglass", .actualSize), RibbonCommand("zoomIn", "Zoom In", "Увеличить", "plus.magnifyingglass", .zoomIn), RibbonCommand("fitWidth", "Fit Width", "По ширине", "arrow.left.and.right", .fitWidth), RibbonCommand("rotateLeft", "Rotate 90° CCW", "Повернуть на 90° влево", "rotate.left", .rotateLeft), RibbonCommand("rotateRight", "Rotate 90° CW", "Повернуть на 90° вправо", "rotate.right", .rotateRight)]),
                 RibbonGroupSpec("objects", "Objects", "Объекты", [tool("addText", "Add Text", "Добавить текст", "text.badge.plus", .addText), tool("editText", "Edit PDF Text", "Редактировать текст", "character.cursor.ibeam", .editText), tool("editContent", "Content Editor", "Редактор содержимого", "cursorarrow.square", .editContent), RibbonCommand("pasteObject", "Paste", "Вставить", "doc.on.clipboard", .paste), RibbonCommand("copyObject", "Copy", "Копировать", "doc.on.doc", .copy), RibbonCommand("cutObject", "Cut", "Вырезать", "scissors", .cut), RibbonCommand("deleteObject", "Delete", "Удалить", "trash", .deleteSelection), cmd("addImage", "Add Image", "Добавить изображение", "photo.badge.plus")]),
                 RibbonGroupSpec("comment", "Comment", "Комментарий", [tool("typewriter", "Text Box", "Текстовое поле", "character.cursor.ibeam", .typewriter), RibbonCommand("highlight", "Highlight Text", "Подсветить текст", "highlighter", .highlight), RibbonCommand("underline", "Underline", "Подчёркивание", "underline", .underline), cmd("stamp", "Stamp", "Штамп", "seal"), cmd("sticky", "Sticky Note", "Заметка", "note.text")]),
@@ -2176,6 +2176,7 @@ private struct PDFViewer: NSViewRepresentable {
         view.clipsToBounds = true
         view.backgroundColor = NSColor(calibratedWhite: 0.12, alpha: 1)
         view.displaysPageBreaks = true
+        view.pageBreakMargins = NSEdgeInsets(top: 2,left: 2,bottom: 2,right: 2)
         view.displayBox = .cropBox
         view.pageShadowsEnabled = true
         view.autoScales = false
@@ -2988,11 +2989,14 @@ private struct PDFViewer: NSViewRepresentable {
             view.go(to: page); view.layoutDocumentView(); view.layoutSubtreeIfNeeded()
             if let scroll = view.internalScrollView {
                 let rect = view.convert(page.bounds(for: view.displayBox),from: page)
-                let vertical = max(8,(scroll.contentView.bounds.height-rect.height)/2+8)
-                let margin = vertical/max(0.05,view.scaleFactor)
-                let next = NSEdgeInsets(top: margin,left: 8,bottom: margin,right: 8)
+                let vertical = max(0,(scroll.contentView.bounds.height-rect.height)/2)
+                let next = NSEdgeInsets(top: 2,left: 2,bottom: 2,right: 2)
                 let previous = view.pageBreakMargins
-                if previous.top != next.top || previous.bottom != next.bottom || previous.left != next.left || previous.right != next.right { view.pageBreakMargins = next; view.layoutDocumentView(); view.layoutSubtreeIfNeeded() }
+                if previous.top != 2 || previous.bottom != 2 || previous.left != 2 || previous.right != 2 { view.pageBreakMargins = next; view.layoutDocumentView(); view.layoutSubtreeIfNeeded() }
+                // Padding belongs at the document edges, not on every page.
+                scroll.automaticallyAdjustsContentInsets = false
+                scroll.contentInsets = NSEdgeInsets(top: vertical,left: 0,bottom: vertical,right: 0)
+                view.layoutSubtreeIfNeeded()
             }
             guard let documentView = view.documentView,let scroll = view.internalScrollView else { return }
             let clip = scroll.contentView
@@ -3724,8 +3728,8 @@ private final class PDFViewerView: PDFView {
             if content.width > clip.bounds.width {
                 proposed.x = min(max(content.minX, proposed.x), content.maxX - clip.bounds.width)
             } else { proposed.x = clip.bounds.minX }
-            if content.height > clip.bounds.height {
-                proposed.y = min(max(content.minY, proposed.y), content.maxY - clip.bounds.height)
+            if content.height+scroll.contentInsets.top+scroll.contentInsets.bottom > clip.bounds.height {
+                proposed.y = min(max(content.minY-scroll.contentInsets.top, proposed.y), content.maxY-clip.bounds.height+scroll.contentInsets.bottom)
             } else { proposed.y = clip.bounds.minY }
         }
         // Keep sub-point deltas between events when AppKit aligns clip origins.
@@ -3774,8 +3778,8 @@ private final class PDFViewerView: PDFView {
                     if content.width > clip.bounds.width {
                         origin.x = min(max(content.minX, origin.x), content.maxX - clip.bounds.width)
                     } else { origin.x = clip.bounds.minX }
-                    if content.height > clip.bounds.height {
-                        origin.y = min(max(content.minY, origin.y), content.maxY - clip.bounds.height)
+                    if content.height+scroll.contentInsets.top+scroll.contentInsets.bottom > clip.bounds.height {
+                        origin.y = min(max(content.minY-scroll.contentInsets.top, origin.y), content.maxY-clip.bounds.height+scroll.contentInsets.bottom)
                     } else { origin.y = clip.bounds.minY }
                 }
                 // Retain fractional coordinates where supported. Older AppKit
@@ -4368,7 +4372,8 @@ private extension DocumentManager {
 private extension PDFViewerView {
     func resetPagePadding() {
         let margin = pageBreakMargins
-        if margin.top != 8 || margin.bottom != 8 { pageBreakMargins = NSEdgeInsets(top: 8,left: 8,bottom: 8,right: 8) }
+        if margin.top != 2 || margin.bottom != 2 || margin.left != 2 || margin.right != 2 { pageBreakMargins = NSEdgeInsets(top: 2,left: 2,bottom: 2,right: 2) }
+        if let scroll = internalScrollView { scroll.contentInsets = NSEdgeInsets(top: 0,left: 0,bottom: 0,right: 0) }
     }
 }
 
@@ -5250,6 +5255,7 @@ private final class PDFNavigationHistory {
         let zoom: CGFloat
         let layout: PageLayout
         let padding: NSEdgeInsets
+        var outerInsets = NSEdgeInsets(top: 0,left: 0,bottom: 0,right: 0)
         func matches(_ other: Location) -> Bool {
             page == other.page && layout == other.layout && abs(zoom-other.zoom) < 0.001 && hypot(point.x-other.point.x,point.y-other.point.y) < 2/max(0.05,zoom)
         }
@@ -5283,7 +5289,7 @@ private extension PDFViewer.Coordinator {
         let index = item.document.index(for: page)
         guard index >= 0, index < item.pageCount else { return nil }
         let point = view.convert(CGPoint(x: view.bounds.midX,y: view.bounds.midY), to: page)
-        return .init(page: index, point: point, zoom: view.scaleFactor, layout: manager.layout, padding: view.pageBreakMargins)
+        return .init(page: index, point: point, zoom: view.scaleFactor, layout: manager.layout, padding: view.pageBreakMargins, outerInsets: view.internalScrollView?.contentInsets ?? NSEdgeInsets(top: 0,left: 0,bottom: 0,right: 0))
     }
     func recordNavigation(_ view: PDFViewerView, item: PDFDocumentItem) {
         guard !navigationRestoring else { return }
@@ -5320,6 +5326,7 @@ private extension PDFViewer.Coordinator {
         view.displayMode = location.layout.pdfMode; view.displaysAsBook = location.layout == .spread
         view.autoScales = false; view.scaleFactor = PDFZoomLimits.clamp(location.zoom)
         view.pageBreakMargins = location.padding
+        if let scroll = view.internalScrollView { scroll.automaticallyAdjustsContentInsets = false; scroll.contentInsets = location.outerInsets }
         view.go(to: page); view.layoutDocumentView(); view.layoutSubtreeIfNeeded()
         if let scroll = view.internalScrollView {
             let clip = scroll.contentView

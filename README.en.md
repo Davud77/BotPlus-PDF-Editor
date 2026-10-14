@@ -187,3 +187,5 @@ The full preset library can be imported/exported as JSON. Import merges IDs and 
 Organize → Extract / Split / Page Order supports ranges, page-count or top-level bookmark groups, reverse order ranges, direct internal links and Undo. Independent export workers support cancellation/progress and protect the original file. Output does not inherit the source encryption.
 
 View → Snapshot copies a region as PNG at 72–600 DPI (Properties). Previous/Next View and top arrows restore each document’s page, zoom, center and display mode. Session history holds up to 150 views and clears after structural changes or Undo. Search runs on Enter; high-DPI raster enlargement is corrected.
+
+Snapshot is also available on Home. Smaller page-break margins keep adjacent sheets compact; short-page centering uses outer document insets instead of padding each page.
