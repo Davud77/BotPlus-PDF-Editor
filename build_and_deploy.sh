@@ -114,9 +114,17 @@ if [[ -n "${BOTPLUS_NOTARY_PROFILE:-}" ]]; then
   xcrun notarytool submit "$DMG_PATH" --keychain-profile "$BOTPLUS_NOTARY_PROFILE" --wait
   xcrun stapler staple "$DMG_PATH"
   xcrun stapler validate "$DMG_PATH"
+  xcrun stapler staple "$STAGED_APP"
+  xcrun stapler validate "$STAGED_APP"
 fi
 (cd "$DIST_DIRECTORY" && shasum -a 256 BotPlus-PDF-Editor.dmg > BotPlus-PDF-Editor.dmg.sha256)
-printf 'DMG ready: %s\n' "$DMG_PATH"
+# Dedicated, bounded ZIP for the sandboxed updater: regular files only, no
+# /Applications symlink, resource forks or privileged installer scripts.
+UPDATE_ZIP="$DIST_DIRECTORY/BotPlus-PDF-Editor-update.zip"
+ditto -c -k --keepParent --norsrc "$STAGED_APP" "$TEMP_DIRECTORY/BotPlus-PDF-Editor-update.zip"
+mv -f "$TEMP_DIRECTORY/BotPlus-PDF-Editor-update.zip" "$UPDATE_ZIP"
+(cd "$DIST_DIRECTORY" && shasum -a 256 BotPlus-PDF-Editor-update.zip > BotPlus-PDF-Editor-update.zip.sha256)
+printf 'DMG ready: %s\nUpdate archive ready: %s\n' "$DMG_PATH" "$UPDATE_ZIP"
 
 if [[ "$PACKAGE_ONLY" == true ]]; then exit 0; fi
 

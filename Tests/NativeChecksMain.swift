@@ -27,6 +27,7 @@ struct NativeChecks {
 
         _ = NSApplication.shared
         NSApp.setActivationPolicy(.prohibited)
+        try checkUpdatePolicies(root: root)
         try checkRelease12(root: root)
         try checkContentEditor(root: root)
         if let path = ProcessInfo.processInfo.environment["BOTPLUS_BENCH_PDF"] { try benchmarkRelease12(root: root,path: path) }
@@ -1269,10 +1270,88 @@ private func checkDocumentWorkflows(root: URL) async throws {
         let image = NSBitmapImageRep(data: png)!
         expect(image.pixelsWide == (angle%180 == 0 ? 240 : 160) && image.pixelsHigh == (angle%180 == 0 ? 160 : 240), "snapshot DPI and rotation dimensions")
     }
+    let blank = PDFDocument(); let blankPage = PDFPage(); blankPage.setBounds(CGRect(x: 0,y: 0,width: 600,height: 600),for: .mediaBox); blank.insert(blankPage,at: 0)
+    let blankData = try PDFDocumentSerializer.data(blank,preserveStreams: false)
+    let transparent = try await Task.detached { try PDFSnapshotRenderer.render(data: blankData,index: 0,region: CGRect(x: 0,y: 0,width: 600,height: 600),dpi: 150,transparent: true) }.value
+    let alpha = NSBitmapImageRep(data: transparent)!.colorAt(x: 10,y: 10)!.alphaComponent
+    expect(alpha == 0,"transparent snapshot background")
+    let preview = try await Task.detached { try PDFSnapshotRenderer.preview(transparent) }.value
+    let pixels = NSBitmapImageRep(data: preview)!
+    expect(max(pixels.pixelsWide,pixels.pixelsHigh) <= 500,"snapshot inspector preview is bounded")
+    let oldGap = manager.pageGap, scale = view.scaleFactor, currentDocument = view.document
+    manager.pageGap = 20; coordinator.requestUpdate(view); try await Task.sleep(for: .milliseconds(80))
+    expect(view.configuredPageMargin == 10 && view.pageBreakMargins.top == 10,"page spacing applies natively")
+    expect(view.document === currentDocument && abs(view.scaleFactor-scale) < 0.001,"spacing does not rebuild document or reset zoom")
+    manager.pageGap = oldGap; coordinator.requestUpdate(view); try await Task.sleep(for: .milliseconds(80))
     view.activeTool = .snapshot; var captured = false; view.onSnapshot = { _, rect in captured = rect.width > 0 }
     let revision = manager.contentRevision, annotations = source.page(at: 0)!.annotations.count
     view.checkDraw(page: source.page(at: 0)!,start: CGPoint(x: 20,y: 100),end: CGPoint(x: 140,y: 180),tool: .snapshot)
     expect(captured && manager.contentRevision == revision && source.page(at: 0)!.annotations.count == annotations, "snapshot tool creates no annotation or content revision")
     coordinator.detach(); view.stopEventMonitoring(); window.orderOut(nil)
     print("PASS: ordered page plans, split groups, extraction links/bookmarks/metadata, reorder/Undo, page/zoom/position history without serialization, rotated DPI snapshots and transient tool safety")
+}
+
+@MainActor
+private func checkUpdatePolicies(root: URL) throws {
+    func expect(_ condition: @autoclosure () -> Bool,_ message: String) { if !condition() { fatalError("CHECK FAILED: \(message)") } }
+    let now = Date(timeIntervalSince1970: 1706659200)
+    var policy = UpdatePolicy()
+    expect(policy.shouldNotify(version: "v1.8",installed: "1.7",now: now),"new release notifies")
+    policy.skipped = "v1.8"
+    expect(!policy.shouldNotify(version: "1.8.0",installed: "1.7",now: now),"skip normalizes release version")
+    expect(policy.shouldNotify(version: "1.9",installed: "1.7",now: now),"skip does not suppress subsequent versions")
+    policy.snoozedUntil = UpdatePolicy.month(after: now)
+    expect(!policy.shouldNotify(version: "1.9",installed: "1.7",now: now),"month snooze")
+    expect(policy.shouldNotify(version: "1.9",installed: "1.7",now: policy.snoozedUntil!),"snooze expires")
+    expect(!ReleaseUpdate.isNewer("1.999999999999999999999999999999999",than: "1.7"),"overflow version rejected")
+    expect(!ReleaseUpdate.assetURL(URL(string: "https://github.com/other/repo/releases/download/v1.8/archive.zip")!,tag: "v1.8"),"wrong release source rejected")
+    expect(!ReleaseUpdate.permittedDownload(URL(string: "http://github.com/a")!),"insecure redirects rejected")
+    expect(!ReleaseUpdate.permittedDownload(URL(string: "https://release-assets.githubusercontent.com.evil.example/a")!),"redirect host is exact")
+    expect(PDFPageSpacing.clamp(.nan) == 4 && PDFPageSpacing.clamp(-1) == 0 && PDFPageSpacing.clamp(41) == 40,"page spacing clamps invalid settings")
+    expect(UpdateArchive.validDigest("sha256:"+String(repeating: "a",count: 64)) != nil,"SHA-256 accepted")
+    expect(UpdateArchive.validDigest("md5:"+String(repeating: "a",count: 64)) == nil,"wrong digest rejected")
+    expect(UpdateArchive.checksum(Data("abc".utf8)) == "ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad","SHA-256 calculation")
+    let source = root.appendingPathComponent("zip-fixture/BotPlus PDF Editor.app")
+    try FileManager.default.createDirectory(at: source.appendingPathComponent("Contents"),withIntermediateDirectories: true)
+    try Data("fixture".utf8).write(to: source.appendingPathComponent("Contents/Info.plist"))
+    func zip(_ name: String) throws -> Data {
+        let url = root.appendingPathComponent(name), process = Process()
+        process.executableURL = URL(fileURLWithPath: "/usr/bin/ditto"); process.arguments = ["-c","-k","--keepParent","--norsrc",source.path,url.path]
+        try process.run(); process.waitUntilExit(); expect(process.terminationStatus == 0,"fixture ZIP created"); return try Data(contentsOf: url)
+    }
+    let good = try zip("good.zip"); try UpdateArchive.validate(good)
+    let truncated = good.dropLast()
+    do { try UpdateArchive.validate(Data(truncated)); fatalError("truncated ZIP accepted") } catch { }
+    var bad = good
+    let needle = Data("BotPlus PDF Editor.app/Contents/Info.plist".utf8)
+    let escape = Data("BotPlus PDF Editor.app/../escapeInfo.plist".utf8)
+    expect(needle.count == escape.count,"traversal fixture length")
+    while let range = bad.range(of: needle) { bad.replaceSubrange(range,with: escape) }
+    do { try UpdateArchive.validate(bad); fatalError("ZIP traversal accepted") } catch { }
+    try FileManager.default.createSymbolicLink(at: source.appendingPathComponent("Contents/escape"),withDestinationURL: root)
+    do { try UpdateArchive.validate(try zip("symlink.zip")); fatalError("ZIP symlink accepted") } catch { }
+    let installed = root.appendingPathComponent("swap-current.app"), next = root.appendingPathComponent("swap-next.app"), backup = root.appendingPathComponent("swap-backup.app")
+    try Data("old".utf8).write(to: installed); try Data("new".utf8).write(to: next)
+    do {
+        try UpdateInstaller.swap(next: next,current: installed,backup: backup) { from,to in
+            if from == next { throw UpdateFailure.invalid("Simulated installation failure") }
+            try FileManager.default.moveItem(at: from,to: to)
+        }
+        fatalError("simulated failed update succeeded")
+    } catch { }
+    let oldContents = try String(contentsOf: installed,encoding: .utf8)
+    expect(oldContents == "old","rollback preserves old app")
+    try UpdateInstaller.swap(next: next,current: installed,backup: backup)
+    let newContents = try String(contentsOf: installed,encoding: .utf8)
+    expect(newContents == "new","new app installed")
+    let backupContents = try String(contentsOf: backup,encoding: .utf8)
+    expect(backupContents == "old","old app retained")
+    let suite = "BotPlusUpdateChecks-"+UUID().uuidString, defaults = UserDefaults(suiteName: suite)!
+    defer { defaults.removePersistentDomain(forName: suite) }
+    let controller = AppUpdateController(installed: "1.7",defaults: defaults)
+    expect(controller.automaticChecks && !controller.automaticInstall,"automatic install is opt-in")
+    controller.automaticChecks = false; controller.automaticInstall = true
+    let reloaded = AppUpdateController(installed: "1.7",defaults: defaults)
+    expect(!reloaded.automaticChecks && reloaded.automaticInstall,"preferences persist")
+    print("PASS: update policy, skip/snooze/expiry, fixed HTTPS release origins, SHA-256, ZIP traversal/symlink/truncation guards and rollback")
 }

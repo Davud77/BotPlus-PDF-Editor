@@ -10,7 +10,7 @@ import UniformTypeIdentifiers
 
 private enum BotPlusBrand {
     static let name = "BotPlus PDF Editor"
-    static let version = "1.6"
+    static let version = "1.7"
     static let copyright = "© 2026 BotPlus"
     static let supportURL = URL(string: "https://github.com/Davud77/BotPlus-PDF-Editor")!
     static let telegramURL = URL(string: "https://t.me/botplus_pdf")!
@@ -432,7 +432,8 @@ private final class PDFDocumentItem: ObservableObject, Identifiable {
     var canPreserveStreams: Bool {
         streamIdentity == ObjectIdentifier(document) && streamRoot == PDFDocumentState.rootStamp(document) && streamPages == (0..<pageCount).compactMap { document.page(at: $0).map(ObjectIdentifier.init) }
     }
-    var filename: String { isUntitled ? "Untitled.pdf" : url.lastPathComponent }
+    var recoveredFilename: String?
+    var filename: String { isUntitled ? recoveredFilename ?? "Untitled.pdf" : url.lastPathComponent }
     var pageCount: Int { document.pageCount }
 }
 
@@ -446,6 +447,13 @@ private final class DocumentManager: ObservableObject {
     @Published var pageWorkflowRequest: PDFPageWorkflowRequest?
     var afterPageWorkflowDismiss: (() -> Void)?
     @Published var snapshotDPI = 150
+    @Published var snapshotTransparent = false
+    @Published var snapshotImage: NSImage?
+    var snapshotPNG: Data?
+    @Published var isSpacingPresented = false
+    @Published var pageGap = PDFPageSpacing.clamp(UserDefaults.standard.object(forKey: "BotPlus.pageGap") as? Double ?? 4) {
+        didSet { UserDefaults.standard.set(pageGap,forKey: "BotPlus.pageGap") }
+    }
     @Published var navigationRevision = 0
     @Published var operationProgress: Double?
     @Published var operationTitle = ""
@@ -455,9 +463,6 @@ private final class DocumentManager: ObservableObject {
     private var openingPaths = Set<String>()
     @Published var isLicensePresented = false
     @Published var isUpdatePresented = false
-    @Published var checkingUpdates = false
-    @Published var latestRelease: ReleaseUpdate?
-    @Published var updateError: String?
     private var serializedIdentity: ObjectIdentifier?
     private var serializedRevision = -1
     private var serializedStamp: Int?
@@ -517,6 +522,7 @@ private final class DocumentManager: ObservableObject {
         guard let selected else { return BotPlusBrand.name }
         return "\(selected.filename) - \(BotPlusBrand.name)"
     }
+    func restoreRecovered(_ item: PDFDocumentItem) { documents.append(item); select(item.id) }
     func text(_ value: Bilingual) -> String { value.value(language) }
     func say(_ en: String, _ ru: String) { notice = language == .ru ? ru : en }
 
@@ -652,6 +658,7 @@ private final class DocumentManager: ObservableObject {
         if case .feature(let id) = action {
             if id == "license" { isLicensePresented = true; return }
             if id == "updates" { checkUpdates(); return }
+            if id == "spacing" { isSpacingPresented = true; return }
             if id == "undo" || id == "redo" { undoDocument(redo: id == "redo"); return }
             if id == "blank" { createBlankDocument(); return }
             if id == "newWindow" { PDFWindowPool.shared.open(); return }
@@ -862,7 +869,7 @@ private extension DocumentManager {
     func canPerform(_ action: RibbonAction) -> Bool {
         switch action {
         case .open,.settings,.toggleLanguage,.toggleRulers,.panels,.languagePicker,.themePicker,.about,.support,.telegram: return true
-        case .feature(let id) where ["license","updates","blank","fromFiles","scanner","newWindow","customize"].contains(id): return true
+        case .feature(let id) where ["license","updates","blank","fromFiles","scanner","newWindow","customize","spacing"].contains(id): return true
         default: break
         }
         guard let item = selected,!item.document.isLocked else { return false }
@@ -950,6 +957,19 @@ private final class BotPlusAppDelegate: NSObject, NSApplicationDelegate, NSMenuI
         let urls = pendingURLs
         pendingURLs.removeAll()
         receive(urls)
+        restoreUpdateRecovery()
+        if let bookmarks = UserDefaults.standard.array(forKey: "BotPlus.update.pendingFiles") as? [Data] {
+            let files = bookmarks.compactMap { data -> URL? in
+                var stale = false
+                return try? URL(resolvingBookmarkData: data,options: .withSecurityScope,relativeTo: nil,bookmarkDataIsStale: &stale)
+            }
+            UserDefaults.standard.removeObject(forKey: "BotPlus.update.pendingFiles"); receive(files)
+        }
+        AppUpdateController.shared.onAvailable = { [weak self] in
+            guard let self, self.workspace?.attachedSheet == nil else { return }
+            self.manager.isUpdatePresented = true
+        }
+        AppUpdateController.shared.start()
     }
 
     // Finder double-click, Open With, multiple-file selection and Dock drops
@@ -961,6 +981,7 @@ private final class BotPlusAppDelegate: NSObject, NSApplicationDelegate, NSMenuI
 
     private func receive(_ urls: [URL]) {
         guard !urls.isEmpty else { return }
+        if AppUpdateController.shared.installing { pendingURLs.append(contentsOf: urls); return }
         showWorkspace()
         // Defer model publication until after Apple Event/window processing.
         DispatchQueue.main.async { [weak self] in
@@ -970,11 +991,94 @@ private final class BotPlusAppDelegate: NSObject, NSApplicationDelegate, NSMenuI
     }
 
     func applicationShouldHandleReopen(_ sender: NSApplication, hasVisibleWindows flag: Bool) -> Bool {
+        guard !AppUpdateController.shared.installing else { return false }
         showWorkspace()
         return false
     }
 
     func applicationShouldTerminateAfterLastWindowClosed(_ sender: NSApplication) -> Bool { false }
+
+    func applicationShouldTerminate(_ sender: NSApplication) -> NSApplication.TerminateReply {
+        let updater = AppUpdateController.shared
+        guard updater.installationArmed else { return .terminateNow }
+        guard !updater.installing else { return .terminateCancel }
+        let owners = [manager] + PDFWindowPool.shared.allManagers
+        guard owners.allSatisfy({ $0.loadingFiles == 0 && $0.operationTask == nil && $0.finishSourceEditing?() != false }) else {
+            manager.say("Finish or cancel document operations before installing an update.","Завершите или отмените операции с документами перед установкой обновления.")
+            return .terminateCancel
+        }
+        let hidden = sender.windows.filter { $0.isVisible }
+        hidden.forEach { $0.orderOut(nil) }
+        Task { @MainActor in
+            var recoveryPrepared = false
+            do {
+                try preserveUpdateRecovery(owners)
+                recoveryPrepared = true
+                try await updater.installOnQuit()
+                if !pendingURLs.isEmpty {
+                    let bookmarks = pendingURLs.compactMap { try? $0.bookmarkData(options: .withSecurityScope,includingResourceValuesForKeys: nil,relativeTo: nil) }
+                    UserDefaults.standard.set(bookmarks,forKey: "BotPlus.update.pendingFiles")
+                }
+                sender.reply(toApplicationShouldTerminate: true)
+            } catch {
+                if recoveryPrepared { try? FileManager.default.removeItem(at: recoveryRoot.appendingPathComponent("pending.txt")); UserDefaults.standard.removeObject(forKey: "BotPlus.update.recovery") }
+                updater.installationFailed(error.localizedDescription)
+                sender.reply(toApplicationShouldTerminate: false)
+                hidden.forEach { $0.makeKeyAndOrderFront(nil) }
+                DispatchQueue.main.async { self.manager.isUpdatePresented = true; let urls = self.pendingURLs; self.pendingURLs.removeAll(); self.receive(urls) }
+            }
+        }
+        return .terminateLater
+    }
+
+    private struct RecoveredPDF: Codable {
+        var file: String; var original: URL; var name: String?; var untitled: Bool; var page: Int; var zoom: CGFloat
+    }
+    private var recoveryRoot: URL {
+        FileManager.default.urls(for: .applicationSupportDirectory,in: .userDomainMask)[0].appendingPathComponent("BotPlusUpdateRecovery",isDirectory: true)
+    }
+    private func preserveUpdateRecovery(_ owners: [DocumentManager]) throws {
+        guard owners.reduce(0,{ $0+$1.documents.count }) <= 1000 else { throw UpdateFailure.invalid("Слишком много открытых документов для обновления / Too many open documents for update recovery") }
+        let fm = FileManager.default, root = recoveryRoot
+        try fm.createDirectory(at: root,withIntermediateDirectories: true,attributes: [.posixPermissions: 0o700])
+        let batch = root.appendingPathComponent(UUID().uuidString,isDirectory: true)
+        try fm.createDirectory(at: batch,withIntermediateDirectories: false,attributes: [.posixPermissions: 0o700])
+        var records: [RecoveredPDF] = [], committed = false
+        defer { if !committed { try? fm.removeItem(at: batch) } }
+        for owner in owners { for item in owner.documents {
+            let name = UUID().uuidString+".pdf"
+            try owner.serializedData(item).write(to: batch.appendingPathComponent(name),options: .atomic)
+            try fm.setAttributes([.posixPermissions: 0o600],ofItemAtPath: batch.appendingPathComponent(name).path)
+            records.append(.init(file: name,original: item.url,name: item.filename,untitled: item.isUntitled,page: item.pageIndex,zoom: item.zoom))
+        } }
+        try JSONEncoder().encode(records).write(to: batch.appendingPathComponent("documents.json"),options: .atomic)
+        try fm.setAttributes([.posixPermissions: 0o600],ofItemAtPath: batch.appendingPathComponent("documents.json").path)
+        try Data(batch.lastPathComponent.utf8).write(to: root.appendingPathComponent("pending.txt"),options: .atomic)
+        try fm.setAttributes([.posixPermissions: 0o600],ofItemAtPath: root.appendingPathComponent("pending.txt").path)
+        committed = true
+    }
+    private func restoreUpdateRecovery() {
+        guard let name = (try? String(contentsOf: recoveryRoot.appendingPathComponent("pending.txt"),encoding: .utf8)) ?? UserDefaults.standard.string(forKey: "BotPlus.update.recovery"), UUID(uuidString: name) != nil else { return }
+        let batch = recoveryRoot.appendingPathComponent(name,isDirectory: true)
+        do {
+            let records = try JSONDecoder().decode([RecoveredPDF].self,from: Data(contentsOf: batch.appendingPathComponent("documents.json")))
+            guard records.count <= 1000 else { return }
+            var recovered: [PDFDocumentItem] = []
+            for record in records {
+                guard record.file.range(of: "^[A-Fa-f0-9-]{36}\\.pdf$",options: .regularExpression) != nil,
+                      let document = PDFDocument(url: batch.appendingPathComponent(record.file)) else { throw PDFSourceError.document }
+                AnnotationMetadata.restore(document)
+                // Recovery becomes an untitled copy: saving cannot overwrite an original silently.
+                let item = PDFDocumentItem(url: record.original,document: document)
+                item.isUntitled = true; item.recoveredFilename = record.name ?? record.original.lastPathComponent; item.pageIndex = min(max(0,record.page),max(0,document.pageCount-1)); item.zoom = record.zoom.isFinite ? record.zoom : 1
+                recovered.append(item)
+            }
+            for item in recovered { manager.restoreRecovered(item) }
+            try? FileManager.default.removeItem(at: recoveryRoot.appendingPathComponent("pending.txt"))
+            UserDefaults.standard.removeObject(forKey: "BotPlus.update.recovery")
+            if !records.isEmpty { DispatchQueue.main.async { [weak self] in self?.manager.say("Open PDFs restored as unsaved copies. Save As keeps your originals intact.","Открытые PDF восстановлены как несохранённые копии. Сохраните их через «Сохранить как».") } }
+        } catch { DispatchQueue.main.async { [weak self] in self?.manager.say("Recovery files remain in Application Support/BotPlusUpdateRecovery.","Файлы восстановления сохранены в Application Support/BotPlusUpdateRecovery.") } }
+    }
 
     private func showWorkspace() {
         if workspace == nil {
@@ -1019,6 +1123,7 @@ private final class BotPlusAppDelegate: NSObject, NSApplicationDelegate, NSMenuI
         let app = menu(BotPlusBrand.name)
         command(app, "About BotPlus PDF Editor", "О программе BotPlus PDF Editor", "", .about)
         command(app, "Settings…", "Настройки…", ",", .settings)
+        command(app, "Updates…", "Обновления…", "", .feature("updates"))
         app.addItem(.separator())
         let services = NSMenu(title: text("Services", "Службы"))
         let servicesItem = NSMenuItem(title: services.title, action: nil, keyEquivalent: "")
@@ -1081,6 +1186,7 @@ private final class BotPlusAppDelegate: NSObject, NSApplicationDelegate, NSMenuI
     }
 
     func validateMenuItem(_ item: NSMenuItem) -> Bool {
+        if AppUpdateController.shared.installing { return false }
         guard let action = item.representedObject as? RibbonAction else { return true }
         if let editor = NSApp.keyWindow?.firstResponder as? NSTextView {
             switch action {
@@ -1143,6 +1249,14 @@ private struct ContentView: View {
         .sheet(isPresented: $manager.isAboutPresented) { AboutDialog(manager: manager) }
         .sheet(isPresented: $manager.isLicensePresented) { LicenseDialog(manager: manager) }
         .sheet(isPresented: $manager.isUpdatePresented) { UpdateDialog(manager: manager) }
+        .sheet(isPresented: $manager.isSpacingPresented) {
+            VStack(alignment: .leading,spacing: 20) {
+                Text(manager.language == .ru ? "Расстояние между страницами" : "Page spacing").font(.title2)
+                HStack { Slider(value: $manager.pageGap,in: 0...40,step: 1); Text("\(Int(manager.pageGap)) pt").monospacedDigit().frame(width: 55) }
+                Text(manager.language == .ru ? "Сохраняется для новых окон. Масштаб PDF и размеры страниц не изменяются." : "Saved for new windows. PDF zoom and page sizes stay unchanged.").font(.caption)
+                HStack { Button(manager.language == .ru ? "Сбросить" : "Reset") { manager.pageGap = 4 }; Spacer(); Button(manager.language == .ru ? "Готово" : "Done") { manager.isSpacingPresented = false } }
+            }.padding(24).frame(width: 450).preferredColorScheme(manager.theme.colorScheme)
+        }
         .alert(manager.language == .ru ? "Сообщение" : "Notice", isPresented: Binding(
             get: { manager.notice != nil }, set: { if !$0 { manager.notice = nil } }
         )) {
@@ -1379,7 +1493,7 @@ private struct RibbonView: View {
             return [
                 RibbonGroupSpec("navigation", "Navigation", "Навигация", [cmd("historyBack", "Previous View", "Предыдущий вид", "arrow.uturn.backward"), cmd("historyForward", "Next View", "Следующий вид", "arrow.uturn.forward"), RibbonCommand("prev", "Previous Page", "Предыдущая страница", "chevron.left", .previous), RibbonCommand("next", "Next Page", "Следующая страница", "chevron.right", .next), RibbonCommand("first", "First Page", "Первая страница", "backward.end", .first), RibbonCommand("last", "Last Page", "Последняя страница", "forward.end", .last)]),
                 RibbonGroupSpec("zoom", "Zoom", "Масштаб", [RibbonCommand("actual", "1:1", "1:1", "1.magnifyingglass", .actualSize), RibbonCommand("zoomOut", "Zoom Out", "Уменьшить", "minus.magnifyingglass", .zoomOut), RibbonCommand("zoomIn", "Zoom In", "Увеличить", "plus.magnifyingglass", .zoomIn), RibbonCommand("fitPage", "Fit Page", "Вся страница", "arrow.down.right.and.arrow.up.left", .fitPage), RibbonCommand("fitWidth", "Fit Width", "По ширине", "arrow.left.and.right", .fitWidth), cmd("marquee", "Marquee Zoom", "Масштаб области", "viewfinder"), tool("snapshot", "Snapshot", "Снимок области", "camera.viewfinder", .snapshot)]),
-                RibbonGroupSpec("display", "Page Display", "Отображение страниц", layoutCommands() + [RibbonCommand("rulers", "Rulers", "Линейки", "ruler", .toggleRulers)]),
+                RibbonGroupSpec("display", "Page Display", "Отображение страниц", layoutCommands() + [cmd("spacing", "Page Spacing", "Зазор страниц", "rectangle.split.2x1"), RibbonCommand("rulers", "Rulers", "Линейки", "ruler", .toggleRulers)]),
                 RibbonGroupSpec("window", "Window", "Окно", [RibbonCommand("panels", "Panels", "Панели", "sidebar.left", .panels), cmd("newWindow", "New Window", "Новое окно", "macwindow.badge.plus"), cmd("cascade", "Cascade", "Каскадом", "square.stack")]),
                 RibbonGroupSpec("read", "Read Out Loud", "Чтение вслух", [cmd("read", "Read", "Читать", "speaker.wave.2"), cmd("pauseRead", "Pause", "Пауза", "pause.fill")])
             ]
@@ -1895,6 +2009,13 @@ private struct WorkspacePropertiesContent: View {
                     SourceOrAnnotationProperties(manager: manager)
                 } else if let item = manager.selected {
                     if manager.tool == .snapshot {
+                        Toggle(manager.language == .ru ? "Прозрачный фон" : "Transparent background",isOn: $manager.snapshotTransparent)
+                        if let image = manager.snapshotImage { Image(nsImage: image).resizable().scaledToFit().frame(maxHeight: 160) }
+                        Button(manager.language == .ru ? "Сохранить снимок…" : "Save snapshot…") {
+                            guard let png = manager.snapshotPNG else { return }
+                            let panel = NSSavePanel(); panel.allowedContentTypes = [.png]; panel.nameFieldStringValue = "Snapshot.png"
+                            panel.begin { response in guard response == .OK, let url = panel.url else { return }; DispatchQueue.main.async { do { try png.write(to: url,options: .atomic) } catch { manager.say("Cannot save snapshot","Не удалось сохранить снимок") } } }
+                        }.disabled(manager.snapshotPNG == nil)
                         Picker("DPI", selection: $manager.snapshotDPI) { ForEach([72,96,150,200,300,600], id: \.self) { Text(String($0)).tag($0) } }
                         Text(manager.language == .ru ? "Выделите прямоугольную область. PNG будет скопирован в буфер обмена." : "Drag a rectangular region to copy a PNG to the clipboard.").font(.caption)
                     } else if ![PDFTool.hand,.textSelection,.editText,.editContent,.selectComments,.marquee].contains(manager.tool) { AnnotationStyleControls(manager: manager) }
@@ -2344,6 +2465,10 @@ private struct PDFViewer: NSViewRepresentable {
                     if let saved = item.navigation.current, saved.page < item.pageCount { applyNavigation(saved, view: view, item: item) }
                     else if let page = item.document.page(at: item.pageIndex) { view.go(to: page) }
                 }
+            }
+            let gap = manager.pageGap.isFinite ? min(40,max(0,manager.pageGap)) / 2 : 2
+            if view.configuredPageMargin != gap {
+                view.configuredPageMargin = gap; view.resetPagePadding(); view.layoutDocumentView(); changed = true
             }
             if view.enableDataDetectors { view.enableDataDetectors = false }
             if view.displayMode != manager.layout.pdfMode { view.displayMode = manager.layout.pdfMode; changed = true }
@@ -2990,9 +3115,10 @@ private struct PDFViewer: NSViewRepresentable {
             if let scroll = view.internalScrollView {
                 let rect = view.convert(page.bounds(for: view.displayBox),from: page)
                 let vertical = max(0,(scroll.contentView.bounds.height-rect.height)/2)
-                let next = NSEdgeInsets(top: 2,left: 2,bottom: 2,right: 2)
+                let gap = view.configuredPageMargin
+                let next = NSEdgeInsets(top: gap,left: gap,bottom: gap,right: gap)
                 let previous = view.pageBreakMargins
-                if previous.top != 2 || previous.bottom != 2 || previous.left != 2 || previous.right != 2 { view.pageBreakMargins = next; view.layoutDocumentView(); view.layoutSubtreeIfNeeded() }
+                if previous.top != gap || previous.bottom != gap || previous.left != gap || previous.right != gap { view.pageBreakMargins = next; view.layoutDocumentView(); view.layoutSubtreeIfNeeded() }
                 // Padding belongs at the document edges, not on every page.
                 scroll.automaticallyAdjustsContentInsets = false
                 scroll.contentInsets = NSEdgeInsets(top: vertical,left: 0,bottom: vertical,right: 0)
@@ -3290,6 +3416,7 @@ private final class AnnotationOverlayView: NSView {
 
 @MainActor
 private final class PDFViewerView: PDFView {
+    var configuredPageMargin: CGFloat = 2
     struct Preview { let page: PDFPage; let start: CGPoint; var end: CGPoint; let tool: PDFTool; var points: [CGPoint] = [] }
     private struct Transform {
         let annotation: PDFAnnotation
@@ -4268,6 +4395,7 @@ private final class PDFWindowPool: NSObject,NSWindowDelegate {
     static let shared = PDFWindowPool()
     private var windows: [NSWindow] = []
     private var managers: [ObjectIdentifier: DocumentManager] = [:]
+    var allManagers: [DocumentManager] { Array(managers.values) }
     func manager(for window: NSWindow?) -> DocumentManager? {
         guard let window else { return nil }
         return managers[ObjectIdentifier(window)]
@@ -4371,8 +4499,8 @@ private extension DocumentManager {
 
 private extension PDFViewerView {
     func resetPagePadding() {
-        let margin = pageBreakMargins
-        if margin.top != 2 || margin.bottom != 2 || margin.left != 2 || margin.right != 2 { pageBreakMargins = NSEdgeInsets(top: 2,left: 2,bottom: 2,right: 2) }
+        let margin = pageBreakMargins, gap = configuredPageMargin
+        if margin.top != gap || margin.bottom != gap || margin.left != gap || margin.right != gap { pageBreakMargins = NSEdgeInsets(top: gap,left: gap,bottom: gap,right: gap) }
         if let scroll = internalScrollView { scroll.contentInsets = NSEdgeInsets(top: 0,left: 0,bottom: 0,right: 0) }
     }
 }
@@ -4818,44 +4946,56 @@ private struct LicenseDialog: View {
     }
 }
 
-private struct ReleaseUpdate: Decodable, Sendable {
-    let tag_name: String
-    let name: String?
-    let body: String?
-    let prerelease: Bool
-    let draft: Bool
-    var pageURL: URL? {
-        guard tag_name.range(of: "^v?[0-9]+(?:\\.[0-9]+){1,2}$",options: .regularExpression) != nil else { return nil }
-        return URL(string: "https://github.com/Davud77/BotPlus-PDF-Editor/releases/tag/"+tag_name)
-    }
-    static func isNewer(_ candidate: String,than installed: String) -> Bool {
-        func parts(_ value: String) -> [Int]? {
-            let clean = value.hasPrefix("v") ? String(value.dropFirst()) : value
-            guard clean.range(of: "^[0-9]+(?:\\.[0-9]+){1,2}$",options: .regularExpression) != nil else { return nil }
-            let values = clean.split(separator: ".").compactMap { Int($0) }
-            guard values.count >= 2 else { return nil }; return Array((values+[0,0,0]).prefix(3))
-        }
-        guard let a = parts(candidate),let b = parts(installed) else { return false }
-        for (x,y) in zip(a,b) where x != y { return x > y }; return false
-    }
-}
-
 private struct UpdateDialog: View {
     @ObservedObject var manager: DocumentManager
+    @ObservedObject private var updates = AppUpdateController.shared
+    private func label(_ en: String,_ ru: String) -> String { manager.language == .ru ? ru : en }
     var body: some View {
-        VStack(alignment: .leading,spacing: 14) {
-            Text(manager.language == .ru ? "Обновления" : "Updates").font(.title2)
-            Text((manager.language == .ru ? "Установлена версия " : "Installed version ")+BotPlusBrand.version)
-            if manager.checkingUpdates { ProgressView(manager.language == .ru ? "Проверка GitHub Releases…" : "Checking GitHub Releases…") }
-            if let release = manager.latestRelease {
-                Text((ReleaseUpdate.isNewer(release.tag_name,than: BotPlusBrand.version) ? (manager.language == .ru ? "Доступна версия " : "Available version ") : (manager.language == .ru ? "Новых версий нет. Последний релиз: " : "No newer version. Latest release: "))+release.tag_name)
-                ScrollView { Text(verbatim: release.body ?? "").font(.system(size: 12)).frame(maxWidth: .infinity,alignment: .leading) }.frame(maxHeight: .infinity)
-                if let url = release.pageURL { Link(manager.language == .ru ? "Открыть релиз" : "Open release",destination: url) }
+        VStack(alignment: .leading,spacing: 12) {
+            ScrollView { VStack(alignment: .leading,spacing: 12) {
+            Text(label("Updates","Обновления")).font(.title2)
+            Text(label("Installed version: ","Установлена версия: ")+updates.installed)
+            Toggle(label("Check automatically (every 6 hours)","Проверять автоматически (каждые 6 часов)"),isOn: $updates.automaticChecks)
+            Toggle(label("Download and install on quit","Загружать и устанавливать при выходе"),isOn: $updates.automaticInstall)
+            Text(label("Updates come from Davud77/BotPlus-PDF-Editor on GitHub. Current releases use ad-hoc signing and are not notarized.","Обновления загружаются из Davud77/BotPlus-PDF-Editor на GitHub. Текущие релизы подписаны ad-hoc и не нотарифицированы.")).font(.caption).foregroundStyle(.secondary)
+            Text(label("Installation requires one-time access to the installed app folder. Updates never interrupt editing. Open PDFs are restored from recovery copies on the next launch.","Для установки один раз выберите папку установленного приложения. Обновление не прерывает работу. Открытые PDF восстановятся из резервных копий при следующем запуске.")).font(.caption).foregroundStyle(.secondary)
+            if updates.checking { ProgressView(label("Checking GitHub Releases…","Проверка GitHub Releases…")) }
+            if let release = updates.release {
+                Text((ReleaseUpdate.isNewer(release.tag_name,than: updates.installed) ? label("Available version: ","Доступна версия: ") : label("Latest version: ","Последняя версия: "))+release.tag_name)
+                ScrollView { Text(verbatim: release.body ?? "").font(.system(size: 12)).frame(maxWidth: .infinity,alignment: .leading) }.frame(minHeight: 65,maxHeight: 160)
+                if let url = release.pageURL { Link(label("Open release","Открыть релиз"),destination: url) }
+                if ReleaseUpdate.isNewer(release.tag_name,than: updates.installed) {
+                    HStack {
+                        if updates.staged == nil {
+                            Button(label("Download update","Загрузить обновление")) { updates.download() }.disabled(release.archive == nil || updates.progress != nil || updates.checking)
+                        } else {
+                            Button(updates.installationArmed ? label("Ready to install on quit","Готово к установке при выходе") : label("Install on quit…","Установить при выходе…")) { updates.selectInstallFolder() }.disabled(updates.installationArmed)
+                        }
+                        Button(label("Skip version","Пропустить версию")) { updates.skip() }
+                        Button(label("Snooze for a month","Не уведомлять месяц")) { updates.snooze() }
+                    }
+                    if release.archive == nil { Text(label("This release has no installation archive. Open the release to download its DMG.","У этого релиза нет архива автоустановки. DMG можно скачать на странице релиза.")).font(.caption) }
+                }
             }
-            if let error = manager.updateError { Text(error).foregroundStyle(.orange) }
+            if let value = updates.progress { HStack { ProgressView(value: value); Button(label("Cancel","Отменить")) { updates.cancel() } } }
+            if let date = updates.policy.snoozedUntil { Text(label("Notifications paused until ","Уведомления приостановлены до ")+date.formatted(date: .numeric,time: .omitted)).font(.caption) }
+            if let version = updates.policy.skipped { Text(label("Skipped version: ","Пропущена версия: ")+version).font(.caption) }
+            if updates.policy.skipped != nil || updates.policy.snoozedUntil != nil { Button(label("Restore notifications","Вернуть уведомления")) { updates.resetSuppression() } }
+            if let error = updates.error {
+                let variants = error.components(separatedBy: " / ")
+                Text(manager.language == .ru ? variants.first ?? error : variants.last ?? error).font(.caption).foregroundStyle(.orange)
+            }
+            if let path = UserDefaults.standard.string(forKey: "BotPlus.update.previousApp") {
+                Button(label("Show previous app in Finder","Показать предыдущую сборку в Finder")) { NSWorkspace.shared.activateFileViewerSelecting([URL(fileURLWithPath: path)]) }
+            }
+            }.frame(maxWidth: .infinity,alignment: .leading) }
             Spacer(minLength: 0)
-            HStack { Button(manager.language == .ru ? "Проверить снова" : "Check again") { manager.checkUpdates() }.disabled(manager.checkingUpdates); Spacer(); Button(manager.language == .ru ? "Закрыть" : "Close") { manager.isUpdatePresented = false }.keyboardShortcut(.defaultAction) }
-        }.padding(24).frame(width: 620,height: 480).background(Palette.ribbon).foregroundStyle(Palette.text).preferredColorScheme(manager.theme.colorScheme)
+            HStack {
+                Button(label("Check again","Проверить снова")) { updates.check(manual: true) }.disabled(updates.checking || updates.progress != nil)
+                if updates.installationArmed { Button(label("Cancel installation","Отменить установку")) { updates.disarm() } }
+                Spacer(); Button(label("Close","Закрыть")) { manager.isUpdatePresented = false }.keyboardShortcut(.defaultAction)
+            }
+        }.padding(24).frame(width: 740,height: 640).background(Palette.ribbon).foregroundStyle(Palette.text).preferredColorScheme(manager.theme.colorScheme)
     }
 }
 
@@ -4867,21 +5007,9 @@ private extension DocumentManager {
     }
     func checkUpdates() {
         isUpdatePresented = true
-        guard !checkingUpdates else { return }
-        checkingUpdates = true; updateError = nil
-        Task { @MainActor [weak self] in
-            guard let self else { return }; defer { self.checkingUpdates = false }
-            do {
-                var request = URLRequest(url: URL(string: "https://api.github.com/repos/Davud77/BotPlus-PDF-Editor/releases/latest")!)
-                request.timeoutInterval = 15; request.setValue("application/vnd.github+json",forHTTPHeaderField: "Accept"); request.setValue("BotPlusPDFEditor/"+BotPlusBrand.version,forHTTPHeaderField: "User-Agent")
-                let (data,response) = try await URLSession.shared.data(for: request)
-                guard (response as? HTTPURLResponse)?.statusCode == 200 else { throw URLError(.badServerResponse) }
-                let release = try JSONDecoder().decode(ReleaseUpdate.self,from: data)
-                guard !release.draft,!release.prerelease,release.pageURL != nil else { throw URLError(.cannotParseResponse) }
-                latestRelease = release
-            } catch { updateError = language == .ru ? "Не удалось проверить обновления. Проверьте сеть и повторите попытку." : "Could not check updates. Check your connection and try again." }
-        }
+        AppUpdateController.shared.check(manual: true)
     }
+
 }
 
 // MARK: First roadmap operations
@@ -5325,7 +5453,8 @@ private extension PDFViewer.Coordinator {
         manager.layout = location.layout
         view.displayMode = location.layout.pdfMode; view.displaysAsBook = location.layout == .spread
         view.autoScales = false; view.scaleFactor = PDFZoomLimits.clamp(location.zoom)
-        view.pageBreakMargins = location.padding
+        let gap = view.configuredPageMargin
+        view.pageBreakMargins = NSEdgeInsets(top: gap,left: gap,bottom: gap,right: gap)
         if let scroll = view.internalScrollView { scroll.automaticallyAdjustsContentInsets = false; scroll.contentInsets = location.outerInsets }
         view.go(to: page); view.layoutDocumentView(); view.layoutSubtreeIfNeeded()
         if let scroll = view.internalScrollView {
@@ -5430,15 +5559,17 @@ private extension PDFViewer.Coordinator {
     func copySnapshot(page: PDFPage, region: CGRect) {
         guard let item = manager.selected, item.document.allowsCopying, manager.operationTask == nil else { return }
         let index = item.document.index(for: page); guard index >= 0, index < item.pageCount else { return }
-        let manager = manager, id = UUID(), dpi = manager.snapshotDPI, clipboardRevision = NSPasteboard.general.changeCount
+        let manager = manager, id = UUID(), dpi = manager.snapshotDPI, transparent = manager.snapshotTransparent, clipboardRevision = NSPasteboard.general.changeCount
         manager.activeOperationID = id; manager.operationProgress = 0.1; manager.operationTitle = manager.language == .ru ? "Снимок области" : "Snapshot"
         manager.operationTask = Task { @MainActor in
             defer { manager.activeOperationID = nil; manager.operationProgress = nil; manager.operationTask = nil }
             do {
                 let data = try manager.serializedData(item)
-                let worker = Task.detached(priority: .userInitiated) { try PDFSnapshotRenderer.render(data: data,index: index,region: region,dpi: dpi) }
+                let worker = Task.detached(priority: .userInitiated) { try PDFSnapshotRenderer.render(data: data,index: index,region: region,dpi: dpi,transparent: transparent) }
                 let png = try await withTaskCancellationHandler(operation: { try await worker.value },onCancel: { worker.cancel() })
+                let preview = try await Task.detached(priority: .utility) { try PDFSnapshotRenderer.preview(png) }.value
                 try Task.checkCancellation()
+                manager.snapshotPNG = png; manager.snapshotImage = NSImage(data: preview)
                 // A newer Copy action wins if rendering takes time.
                 guard NSPasteboard.general.changeCount == clipboardRevision else { return }
                 NSPasteboard.general.clearContents(); NSPasteboard.general.setData(png,forType: .png); manager.refreshClipboard()

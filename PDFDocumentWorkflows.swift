@@ -3,6 +3,7 @@
 import SwiftUI
 import AppKit
 import PDFKit
+import ImageIO
 
 struct PDFPageWorkflowOptions {
     var range = "all"
@@ -171,8 +172,18 @@ enum PDFSubsetBuilder {
     }
 }
 
+enum PDFPageSpacing {
+    static func clamp(_ value: Double) -> Double { value.isFinite ? min(40,max(0,value)) : 4 }
+}
+
 enum PDFSnapshotRenderer {
-    static func render(data: Data, index: Int, region: CGRect, dpi: Int) throws -> Data {
+    static func preview(_ png: Data) throws -> Data {
+        guard let source = CGImageSourceCreateWithData(png as CFData,nil),
+              let image = CGImageSourceCreateThumbnailAtIndex(source,0,[kCGImageSourceCreateThumbnailFromImageAlways: true, kCGImageSourceThumbnailMaxPixelSize: 500, kCGImageSourceCreateThumbnailWithTransform: true] as CFDictionary),
+              let result = NSBitmapImageRep(cgImage: image).representation(using: .png,properties: [:]) else { throw PDFImageExportError.encode }
+        return result
+    }
+    static func render(data: Data, index: Int, region: CGRect, dpi: Int, transparent: Bool = false) throws -> Data {
         guard let document = PDFDocument(data: data), let page = document.page(at: index), (72...600).contains(dpi),
               [region.minX,region.minY,region.width,region.height].allSatisfy({ $0.isFinite }) else { throw PDFImageExportError.invalidPDF }
         let crop = page.bounds(for: .cropBox), clipped = region.intersection(crop)
@@ -184,7 +195,8 @@ enum PDFSnapshotRenderer {
         let w = ceil(target.width-0.0000001), h = ceil(target.height-0.0000001)
         guard w.isFinite, h.isFinite, w > 0, h > 0, w <= 20000, h <= 20000, w*h <= 40_000_000 else { throw PDFImageExportError.tooLarge }
         guard let bitmap = NSBitmapImageRep(bitmapDataPlanes: nil, pixelsWide: Int(w), pixelsHigh: Int(h), bitsPerSample: 8, samplesPerPixel: 4, hasAlpha: true, isPlanar: false, colorSpaceName: .deviceRGB, bytesPerRow: 0, bitsPerPixel: 0), let graphics = NSGraphicsContext(bitmapImageRep: bitmap) else { throw PDFImageExportError.render }
-        let context = graphics.cgContext; context.setFillColor(NSColor.white.cgColor); context.fill(CGRect(x: 0,y: 0,width: w,height: h))
+        let context = graphics.cgContext; context.clear(CGRect(x: 0,y: 0,width: w,height: h))
+        if !transparent { context.setFillColor(NSColor.white.cgColor); context.fill(CGRect(x: 0,y: 0,width: w,height: h)) }
         context.translateBy(x: -target.minX,y: -target.minY); context.concatenate(transform)
         NSGraphicsContext.saveGraphicsState(); NSGraphicsContext.current = graphics
         if let ref = page.pageRef { context.drawPDFPage(ref) }
