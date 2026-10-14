@@ -1040,6 +1040,8 @@ private func checkFormatting(root: URL) async throws {
     expect(countBeforeZoom > 0 && coordinator.contentOutlineBuildCount == countBeforeZoom, "pan/zoom keeps content outlines when pages and revision are unchanged")
     coordinator.detach()
     try checkZoomSafety()
+    try checkHoverRoutingAndSplitter()
+    try checkGraphicMarks(root: root)
     print("PASS: decoration templates/ranges/replacement/persistence, margins validation, vector background ordering/update/removal, PNG/JPEG/TIFF export and rotation")
 }
 
@@ -1081,4 +1083,93 @@ private func checkZoomSafety() throws {
     _ = cache.image(page: original.page(at: 0)!, documentID: key, index: 0, revision: 1, width: 600, ratio: 792.0/612.0, interactive: false)
     expect(cache.renderCount == 2, "detail is upgraded after the gesture")
     print("PASS: burst gesture zoom, document isolation, reverse/invalid deltas, cold thumbnail zoom and cached outline reuse")
+}
+
+@MainActor
+private func checkHoverRoutingAndSplitter() throws {
+    func expect(_ value: @autoclosure () -> Bool, _ message: String) { if !value() { fatalError("HOVER CHECK FAILED: \(message)") } }
+    let manager = DocumentManager(); manager.createBlankDocument()
+    expect(manager.thumbnailZoom == 1, "thumbnails initially fit the panel width")
+    let window = NSWindow(contentRect: CGRect(x: 100, y: 100, width: 700, height: 500), styleMask: [.titled], backing: .buffered, defer: false)
+    window.isReleasedWhenClosed = false
+    let root = NSView(frame: CGRect(x: 0, y: 0, width: 700, height: 500)); window.contentView = root
+    let thumbnails = ThumbnailGestureView(frame: CGRect(x: 0, y: 0, width: 200, height: 500)); thumbnails.manager = manager
+    let pdf = PDFViewerView(frame: CGRect(x: 206, y: 0, width: 494, height: 500)); pdf.document = manager.selected!.document; pdf.scaleFactor = 1
+    root.addSubview(thumbnails); root.addSubview(pdf); window.orderFront(nil)
+    defer { thumbnails.stop(); pdf.stopEventMonitoring(); window.orderOut(nil) }
+    let router = HoverGestureRouter.shared
+    let overPDF = window.convertPoint(toScreen: CGPoint(x: 450, y: 250)), overThumbs = window.convertPoint(toScreen: CGPoint(x: 100, y: 250))
+    let front = window.windowNumber
+    let responder = window.firstResponder
+    expect(router.target(at: overPDF, frontWindow: front)?.0 === pdf, "pointer over PDF selects PDF despite thumbnail registration order")
+    expect(router.zoom(0.2, at: overPDF, frontWindow: front), "PDF gesture is routed without clicking")
+    pdf.checkFlushMagnify(); expect(abs(pdf.scaleFactor-exp(0.2)) < 0.001, "routed PDF gesture changes scale")
+    expect(manager.thumbnailZoom == 1, "PDF gesture leaves thumbnails alone")
+    expect(router.zoom(-0.2, at: overThumbs, frontWindow: front), "moving pointer routes next gesture to thumbnails")
+    thumbnails.flush(); expect(manager.thumbnailZoom < 1, "routed thumbnail gesture changes their size")
+    expect(abs(pdf.scaleFactor-exp(0.2)) < 0.001, "thumbnail gesture leaves PDF alone")
+    expect(window.firstResponder === responder, "routing preserves first responder")
+    expect(router.target(at: overPDF, frontWindow: front+100) == nil, "covered window receives no gesture")
+    thumbnails.isHidden = true
+    expect(router.target(at: overThumbs, frontWindow: front) == nil, "hidden thumbnails receive no gesture")
+    let splitter = PanelResizeHandle.SplitterView(frame: CGRect(x: 200,y: 0,width: 6,height: 500)); root.addSubview(splitter)
+    splitter.initialWidth = 230; splitter.direction = 1
+    var result: CGFloat = 0; splitter.onWidth = { result = $0 }
+    func event(_ type: NSEvent.EventType, _ x: CGFloat) -> NSEvent {
+        NSEvent.mouseEvent(with: type, location: CGPoint(x: x, y: 200), modifierFlags: [], timestamp: 0, windowNumber: front, context: nil, eventNumber: 0, clickCount: 1, pressure: 1)!
+    }
+    splitter.mouseDown(with: event(.leftMouseDown,203))
+    splitter.mouseDragged(with: event(.leftMouseDragged,253)); splitter.frame.origin.x += 50; splitter.initialWidth = 280
+    splitter.mouseUp(with: event(.leftMouseUp,283))
+    expect(abs(result-310) < 0.001, "moving splitter frame does not feed back into drag translation")
+    splitter.direction = -1; splitter.initialWidth = 310; splitter.mouseDown(with: event(.leftMouseDown,283)); splitter.mouseUp(with: event(.leftMouseUp,233))
+    expect(abs(result-360) < 0.001, "right splitter uses reversed screen delta")
+    print("PASS: pointer-routed PDF/thumbnail zoom without focus, occlusion/hidden safeguards, maximum thumbnail default and stable screen-coordinate splitters")
+}
+
+@MainActor
+private func checkGraphicMarks(root: URL) throws {
+    func expect(_ value: @autoclosure () -> Bool, _ message: String) { if !value() { fatalError("MARK CHECK FAILED: \(message)") } }
+    let request = PDFGraphicMarkRequest(kind: "stamp", russian: true, filename: "Drawing.pdf", page: 2, apply: { _ in nil })
+    let model = PDFGraphicMarkModel(request: request)
+    model.text = "TEST {file} {page} {date}"
+    let text = model.expanded(model.text, date: Date(timeIntervalSince1970: 0))
+    expect(text.contains("Drawing.pdf 3") && !text.contains("{date}"), "dynamic stamp tokens expand")
+    guard let image = model.rendered() else { fatalError("mark rendered") }
+    let bitmap = NSBitmapImageRep(cgImage: image)
+    expect(image.width == 1200 && image.height == 400, "graphic mark has bounded raster resolution")
+    expect(bitmap.colorAt(x: 0,y: 0)?.alphaComponent == 0, "graphic marks preserve transparent background")
+    model.mode = 1; model.strokes = [[CGPoint(x: 0.1,y: 0.2),CGPoint(x: 0.9,y: 0.7)]]
+    expect(model.rendered() != nil, "drawn signature renders")
+    model.mode = 2; model.image = image; expect(model.rendered() != nil, "imported signature renders")
+    let data = try JSONEncoder().encode(PDFGraphicMarkPreset(name: "test", mode: 0, text: "{page}", font: "Helvetica", size: 42, red: 1,green: 0,blue: 0,opacity: 0.7,thickness: 3,border: true,strokes: [],image: nil))
+    let restored = try JSONDecoder().decode(PDFGraphicMarkPreset.self,from: data); model.load(restored)
+    expect(model.text == "{page}" && model.opacity == 0.7 && model.border, "preset roundtrip retains template/style")
+    let document = PDFDocument(); document.insert(PDFRasterizer.textPage("ORIGINAL")!, at: 0)
+    let markerContext = CGContext(data: nil, width: 40, height: 40, bitsPerComponent: 8, bytesPerRow: 160, space: CGColorSpaceCreateDeviceRGB(), bitmapInfo: CGImageAlphaInfo.premultipliedLast.rawValue)!
+    markerContext.setFillColor(NSColor.red.cgColor); markerContext.fill(CGRect(x: 0,y: 20,width: 40,height: 20))
+    markerContext.setFillColor(NSColor.blue.cgColor); markerContext.fill(CGRect(x: 0,y: 0,width: 40,height: 20))
+    let marker = markerContext.makeImage()!
+    let markerData = try PDFSourceSession.insertingImage(data: document.dataRepresentation()!,pageIndex: 0,image: marker,bounds: CGRect(x: 0,y: 0,width: 612,height: 792))
+    let markerPDF = PDFDocument(data: markerData)!
+    let markerPage = markerPDF.page(at: 0)!
+    let raster = NSBitmapImageRep(data: markerPage.thumbnail(of: CGSize(width: 612,height: 792),for: .cropBox).tiffRepresentation!)!
+    let sourcePixels = NSBitmapImageRep(data: NSBitmapImageRep(cgImage: marker).representation(using: .png, properties: [:])!)!
+    let top = raster.colorAt(x: raster.pixelsWide/2,y: raster.pixelsHigh/4)!.usingColorSpace(.sRGB)!
+    let expected = sourcePixels.colorAt(x: 20,y: 10)!.usingColorSpace(.sRGB)!
+    let bottom = raster.colorAt(x: raster.pixelsWide/2,y: raster.pixelsHigh*3/4)!.usingColorSpace(.sRGB)!
+    let expectedBottom = sourcePixels.colorAt(x: 20,y: 30)!.usingColorSpace(.sRGB)!
+    // PDFKit applies its display color profile. Compare color dominance to
+    // detect inversion without requiring byte-identical color conversion.
+    expect((top.redComponent-top.blueComponent)*(expected.redComponent-expected.blueComponent) > 0.1 &&
+           (bottom.redComponent-bottom.blueComponent)*(expectedBottom.redComponent-expectedBottom.blueComponent) > 0.1,
+           "inserted image preserves top/bottom orientation")
+    withExtendedLifetime(markerPDF) {}
+    let changed = try PDFSourceSession.insertingImage(data: document.dataRepresentation()!,pageIndex: 0,image: image,bounds: CGRect(x: 50,y: 100,width: 240,height: 80))
+    let target = root.appendingPathComponent("graphic-signature.pdf"); try changed.write(to: target)
+    let reopened = PDFDocument(url: target)!
+    expect(reopened.string?.contains("ORIGINAL") == true, "graphic mark insertion preserves original searchable text")
+    let session = try PDFContentSession(data: changed,pageIndex: 0)
+    expect(session.objects.contains { $0.kind == "image" && abs($0.bounds.width-240) < 1 }, "saved graphic mark is selectable content")
+    print("PASS: typed/drawn/imported transparent signatures, dynamic stamps, preset serialization and PDF save/reopen")
 }

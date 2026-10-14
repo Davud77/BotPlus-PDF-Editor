@@ -1181,7 +1181,6 @@ extension PDFSourceSession {
         defer { FPDFBitmap_Destroy(bitmap) }
         guard let buffer = FPDFBitmap_GetBuffer(bitmap),let context = CGContext(data: buffer,width: pixelWidth,height: pixelHeight,bitsPerComponent: 8,bytesPerRow: Int(FPDFBitmap_GetStride(bitmap)),space: CGColorSpaceCreateDeviceRGB(),bitmapInfo: CGImageAlphaInfo.premultipliedFirst.rawValue|CGBitmapInfo.byteOrder32Little.rawValue) else { throw PDFSourceError.content }
         context.clear(CGRect(x: 0,y: 0,width: pixelWidth,height: pixelHeight))
-        context.translateBy(x: 0,y: CGFloat(pixelHeight)); context.scaleBy(x: 1,y: -1)
         context.draw(image,in: CGRect(x: 0,y: 0,width: pixelWidth,height: pixelHeight))
         // Quartz emits premultiplied bytes; the AGG PDFium bitmap format
         // requires independent color components. Preserve PNG edge alpha.
@@ -1422,7 +1421,7 @@ final class PDFContentSession {
         defer { FPDFBitmap_Destroy(bitmap) }
         guard let memory = FPDFBitmap_GetBuffer(bitmap),let context = CGContext(data: memory,width: width,height: height,bitsPerComponent: 8,bytesPerRow: Int(FPDFBitmap_GetStride(bitmap)),space: CGColorSpaceCreateDeviceRGB(),bitmapInfo: CGImageAlphaInfo.premultipliedFirst.rawValue|CGBitmapInfo.byteOrder32Little.rawValue) else { throw PDFSourceError.content }
         context.clear(CGRect(x: 0,y: 0,width: width,height: height))
-        context.translateBy(x: 0,y: CGFloat(height)); context.scaleBy(x: 1,y: -1); context.draw(image,in: CGRect(x: 0,y: 0,width: width,height: height))
+        context.draw(image,in: CGRect(x: 0,y: 0,width: width,height: height))
         let pixels = memory.assumingMemoryBound(to: UInt8.self),stride = Int(FPDFBitmap_GetStride(bitmap))
         for row in 0..<height { for column in 0..<width {
             let offset = row*stride+column*4,alpha = Int(pixels[offset+3])

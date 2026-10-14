@@ -56,3 +56,11 @@ New checks cover source-object selection inside fills and on diagonal paths, rej
 The README image was captured from an isolated signed preview application with its own empty preference domain. It shows the actual application UI with no document or private recent-file metadata. The preview is not the user's installed application and does not close its windows or drafts.
 
 Interactive preview verified actual 500% and 65% status-slider zoom, activation of the source-image inspector, and a mouse drag changing X from 400 to 430 pt and Y from 300 to 284.62 pt. Only a generated fixture was used; no user document was saved. The CUA API does not synthesize physical pinch input, so hardware pinch still needs a device check.
+
+## Проверки 1.5
+
+- Один hover-router: основная PDF-область/миниатюры, перенос указателя, скрытые панели и перекрытие окна, без смены первого responder. Проверки вызывают тот же обработчик, что NSEvent monitor; аппаратный щипок отдельно не эмулирован.
+- Splitter: изменение frame самого разделителя во время drag не меняет экранное смещение; обе стороны и ограничения ширины.
+- Подписи: текст/рисунок/изображение, прозрачный край, динамические шаблоны, кодирование шаблона, вставка в PDF и чтение объекта после сохранения.
+
+Редактор штампов проверен в отдельной GUI-сборке: динамическая дата отображается в предпросмотре; вставка выбирает графический объект и открывает его свойства. Обнаруженная вертикальная инверсия исправлена в общем коде вставки/замены и покрыта сравнением верхней/нижней половины изображения.

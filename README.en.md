@@ -173,3 +173,11 @@ Live margin preview; headers/footers, watermark and Bates templates with ranges,
 ### Zoom fixes in 1.4.1
 
 Queued PDF gestures are bound to their document. Unchanged selection state no longer republishes every viewport update; content outlines are reused across zoom/pan. Cold thumbnail gestures start with a lightweight raster and upgrade after settling. The actual thumbnail cache now renders annotations on new blank pages. Native handler tests cover focus-free zoom, burst/reverse deltas, document switching and caches; physical trackpad pinch is not synthesized by the test API.
+
+### Update 1.5
+
+Thumbnails default to panel width, with buttons and pinch/Ctrl/Command + wheel controls; no size slider. One hover router selects the PDF viewport or thumbnails independently of keyboard focus. Screen-coordinate splitters coalesce updates at 60 Hz and defer preferences writes; thumbnail rasters are reused during resizing.
+
+Protect → Signatures/Initials supports typing, drawing and PNG/JPEG/TIFF import, opacity, borders and up to 20 local presets. Home → Stamp shares the editor with {date}/{file}/{page} tokens. Marks can be exported as transparent PNG, are inserted at the current page center and selected in the content editor for move/scale/rotation/deletion. These are graphic marks, not certificate/PKCS#7 signatures.
+
+The full preset library can be imported/exported as JSON. Import merges IDs and validates size/geometry, with no executable templates. Limits: 20 presets and a 16 MB library.

@@ -10,7 +10,7 @@ import UniformTypeIdentifiers
 
 private enum BotPlusBrand {
     static let name = "BotPlus PDF Editor"
-    static let version = "1.4.1"
+    static let version = "1.5"
     static let copyright = "© 2026 BotPlus"
     static let supportURL = URL(string: "https://github.com/Davud77/BotPlus-PDF-Editor")!
     static let telegramURL = URL(string: "https://t.me/botplus_pdf")!
@@ -238,10 +238,12 @@ private final class PanelWorkspaceModel: NSObject, ObservableObject, NSWindowDel
     @Published private(set) var configurations: [WorkspacePanel: PanelConfiguration]
     @Published private(set) var activeLeft: WorkspacePanel = .thumbnails
     @Published private(set) var activeRight: WorkspacePanel = .properties
+    @Published private(set) var isResizing = false
     private var floatingWindows: [WorkspacePanel: NSPanel] = [:]
     private var suppressedClose = Set<ObjectIdentifier>()
     private var floatingSyncPending = false
     private var resizeStarts: [WorkspacePanel: CGFloat] = [:]
+    private var persistenceWork: DispatchWorkItem?
     private let persistenceKey = "BotPlusPDFEditor.panelConfigurations.v1"
     override init() {
         let defaults: [WorkspacePanel: PanelConfiguration] = [
@@ -321,12 +323,13 @@ private final class PanelWorkspaceModel: NSObject, ObservableObject, NSWindowDel
         }
         publish(next)
     }
+    func beginResize() { isResizing = true }
     func resize(_ panel: WorkspacePanel, translation: CGFloat, initialWidth: CGFloat? = nil) {
         let start = resizeStarts[panel] ?? initialWidth ?? CGFloat(configuration(for: panel).width)
         resizeStarts[panel] = start
         setWidth(start + translation, for: panel)
     }
-    func endResize(_ panel: WorkspacePanel) { resizeStarts[panel] = nil }
+    func endResize(_ panel: WorkspacePanel) { resizeStarts[panel] = nil; isResizing = false; persist() }
     private func update(_ panel: WorkspacePanel, change: (inout PanelConfiguration) -> Void) {
         var next = configurations; var config = configuration(for: panel)
         change(&config); next[panel] = config; publish(next)
@@ -334,7 +337,14 @@ private final class PanelWorkspaceModel: NSObject, ObservableObject, NSWindowDel
     private func publish(_ next: [WorkspacePanel: PanelConfiguration]) {
         guard next != configurations else { return }
         configurations = next
-        if let data = try? JSONEncoder().encode(next) { UserDefaults.standard.set(data, forKey: persistenceKey) }
+        persistenceWork?.cancel()
+        let work = DispatchWorkItem { [weak self] in self?.persist() }
+        persistenceWork = work
+        DispatchQueue.main.asyncAfter(deadline: .now()+0.3, execute: work)
+    }
+    private func persist() {
+        persistenceWork?.cancel(); persistenceWork = nil
+        if let data = try? JSONEncoder().encode(configurations) { UserDefaults.standard.set(data, forKey: persistenceKey) }
     }
     func synchronizeFloatingWindows(manager: DocumentManager) {
         guard !floatingSyncPending else { return }; floatingSyncPending = true
@@ -429,6 +439,7 @@ private final class DocumentManager: ObservableObject {
     let recent: RecentPDFStore
     init(recent: RecentPDFStore = .shared) { self.recent = recent }
     @Published var formattingRequest: PDFFormattingRequest?
+    @Published var graphicMarkRequest: PDFGraphicMarkRequest?
     @Published var operationProgress: Double?
     @Published var operationTitle = ""
     var operationTask: Task<Void, Never>?
@@ -452,7 +463,7 @@ private final class DocumentManager: ObservableObject {
     @Published var theme: AppTheme = AppTheme(rawValue: UserDefaults.standard.string(forKey: "BotPlusPDFEditor.theme") ?? "dark") ?? .dark {
         didSet { UserDefaults.standard.set(theme.rawValue, forKey: "BotPlusPDFEditor.theme") }
     }
-    @Published var thumbnailZoom = 0.55
+    @Published var thumbnailZoom = 1.0
     @Published var thumbnailGestureActive = false
     var thumbnailGestureOwner: UUID?
     private var embeddedTextDocument: ObjectIdentifier?
@@ -846,6 +857,7 @@ private extension DocumentManager {
         case .feature("background"), .feature("margins"): return editable
         case .feature("header"), .feature("watermark"), .feature("bates"): return editable && commenting
         case .feature("images"): return item.document.allowsCopying
+        case .feature("signature"), .feature("initials"), .feature("stamp"): return editable
         case .previous,.first: return item.pageIndex > 0
         case .next,.last: return item.pageIndex+1 < item.pageCount
         case .deletePage: return editable && item.pageCount > 1
@@ -1105,6 +1117,7 @@ private struct ContentView: View {
             DispatchQueue.main.async { (NSApp.delegate as? BotPlusAppDelegate)?.rebuildMenus() }
         }
         .onChange(of: manager.theme) { _, _ in manager.panels.synchronizeFloatingWindows(manager: manager) }
+        .sheet(item: $manager.graphicMarkRequest) { PDFGraphicMarkEditor(request: $0) }
         .sheet(item: $manager.formattingRequest) { PDFFormattingEditor(request: $0) }
         .sheet(isPresented: $manager.isAboutPresented) { AboutDialog(manager: manager) }
         .sheet(isPresented: $manager.isLicensePresented) { LicenseDialog(manager: manager) }
@@ -1625,51 +1638,64 @@ private struct DockedPanelContainer: View {
         if let panel = panels.activePanel(on: side) {
             let width = min(CGFloat(panels.configuration(for: panel).width), maximumWidth)
             HStack(spacing: 0) {
-                if side == .right { PanelResizeHandle(panel: panel, manager: manager, direction: -1, initialWidth: width) }
+                if side == .right { PanelResizeHandle(panel: panel, manager: manager, direction: -1, initialWidth: width).frame(width: 6) }
                 VStack(spacing: 0) {
                     PanelHeader(panel: panel, manager: manager)
                     PanelBody(panel: panel, manager: manager)
                 }.frame(width: width).frame(maxHeight: .infinity).background(Palette.panel)
-                if side == .left { PanelResizeHandle(panel: panel, manager: manager, direction: 1, initialWidth: width) }
+                if side == .left { PanelResizeHandle(panel: panel, manager: manager, direction: 1, initialWidth: width).frame(width: 6) }
             }
         }
     }
 }
 
-private struct PanelResizeHandle: View {
+private struct PanelResizeHandle: NSViewRepresentable {
     let panel: WorkspacePanel
     @ObservedObject var manager: DocumentManager
     let direction: CGFloat
     var initialWidth: CGFloat? = nil
-    var body: some View {
-        Rectangle().fill(Color.clear).frame(width: 6).contentShape(Rectangle())
-            .overlay(ResizeCursorRegion().allowsHitTesting(false))
-            .overlay(Palette.separator.opacity(0.7).frame(width: 1))
-            .gesture(DragGesture(minimumDistance: 0)
-                .onChanged { value in
-                    manager.panels.resize(panel, translation: direction * value.translation.width, initialWidth: initialWidth)
-                }
-                .onEnded { _ in manager.panels.endResize(panel) })
-            .help(manager.language == .ru ? "Перетащите, чтобы изменить ширину" : "Drag to resize panel")
+    func makeNSView(context: Context) -> SplitterView { let view = SplitterView(); configure(view); return view }
+    func updateNSView(_ view: SplitterView, context: Context) { configure(view) }
+    private func configure(_ view: SplitterView) {
+        view.initialWidth = initialWidth ?? CGFloat(manager.panels.configuration(for: panel).width)
+        view.direction = direction
+        view.onWidth = { [weak panels = manager.panels] width in panels?.setWidth(width, for: panel) }
+        view.onBegin = { [weak panels = manager.panels] in panels?.beginResize() }
+        view.onEnd = { [weak panels = manager.panels] in panels?.endResize(panel) }
+        view.toolTip = manager.language == .ru ? "Перетащите, чтобы изменить ширину" : "Drag to resize panel"
     }
-}
-
-private struct ResizeCursorRegion: NSViewRepresentable {
-    func makeNSView(context: Context) -> NSView { CursorView(frame: .zero) }
-    func updateNSView(_ view: NSView,context: Context) { }
-    private final class CursorView: NSView {
-        private var tracking: NSTrackingArea?
-        private var cursorInside = false
-        override func resetCursorRects() { addCursorRect(bounds,cursor: .resizeLeftRight) }
-        override func updateTrackingAreas() {
-            if let tracking { removeTrackingArea(tracking) }
-            let next = NSTrackingArea(rect: .zero,options: [.mouseEnteredAndExited,.activeAlways,.inVisibleRect],owner: self)
-            addTrackingArea(next); tracking = next; super.updateTrackingAreas()
+    static func dismantleNSView(_ view: SplitterView, coordinator: ()) { DispatchQueue.main.async { view.finish() } }
+    @MainActor final class SplitterView: NSView {
+        var initialWidth: CGFloat = 230
+        var direction: CGFloat = 1
+        var onWidth: ((CGFloat) -> Void)?
+        var onBegin: (() -> Void)?
+        var onEnd: (() -> Void)?
+        private var startX: CGFloat?
+        private var startWidth: CGFloat = 0
+        private var pendingWidth: CGFloat?
+        private var work: DispatchWorkItem?
+        override var intrinsicContentSize: NSSize { NSSize(width: 6, height: NSView.noIntrinsicMetric) }
+        override func resetCursorRects() { addCursorRect(bounds, cursor: .resizeLeftRight) }
+        override func acceptsFirstMouse(for event: NSEvent?) -> Bool { true }
+        override func draw(_ dirtyRect: NSRect) {
+            NSColor.separatorColor.setFill(); NSRect(x: bounds.midX, y: bounds.minY, width: 1, height: bounds.height).fill()
         }
-        override func mouseEntered(with event: NSEvent) { if !cursorInside { NSCursor.resizeLeftRight.push(); cursorInside = true } }
-        override func mouseExited(with event: NSEvent) { restoreCursor() }
-        override func viewWillMove(toWindow newWindow: NSWindow?) { if newWindow == nil { restoreCursor() }; super.viewWillMove(toWindow: newWindow) }
-        private func restoreCursor() { if cursorInside { NSCursor.pop(); cursorInside = false } }
+        override func mouseDown(with event: NSEvent) {
+            guard let window else { return }
+            startX = window.convertPoint(toScreen: event.locationInWindow).x; startWidth = initialWidth
+            onBegin?(); NSCursor.resizeLeftRight.set()
+        }
+        override func mouseDragged(with event: NSEvent) {
+            guard let startX, let window else { return }
+            pendingWidth = min(600, max(200, startWidth + direction * (window.convertPoint(toScreen: event.locationInWindow).x-startX)))
+            guard work == nil else { return }
+            let next = DispatchWorkItem { [weak self] in self?.flush() }; work = next
+            DispatchQueue.main.asyncAfter(deadline: .now()+1.0/60.0, execute: next)
+        }
+        private func flush() { work = nil; if let width = pendingWidth { pendingWidth = nil; onWidth?(width) } }
+        override func mouseUp(with event: NSEvent) { mouseDragged(with: event); finish() }
+        func finish() { work?.cancel(); work = nil; flush(); if startX != nil { startX = nil; onEnd?() } }
     }
 }
 
@@ -1700,6 +1726,8 @@ private struct PanelHeader: View {
 private struct PanelBody: View {
     let panel: WorkspacePanel
     @ObservedObject var manager: DocumentManager
+    @ObservedObject private var panels: PanelWorkspaceModel
+    init(panel: WorkspacePanel, manager: DocumentManager) { self.panel = panel; self.manager = manager; self.panels = manager.panels }
     var body: some View {
         Group {
             switch panel {
@@ -1719,10 +1747,15 @@ private struct PanelBody: View {
                 let document = item.document
                 VStack(spacing: 4) {
                     HStack {
-                        SystemSymbolImage(name: "minus.magnifyingglass")
-                        Slider(value: $manager.thumbnailZoom,in: 0...1)
-                        SystemSymbolImage(name: "plus.magnifyingglass")
-                    }.padding(.horizontal,10).help(manager.language == .ru ? "Размер миниатюр" : "Thumbnail size")
+                        Button { manager.thumbnailZoom = max(0, manager.thumbnailZoom-0.1) } label: { SystemSymbolImage(name: "minus.magnifyingglass") }
+                            .disabled(manager.thumbnailZoom <= 0)
+                        Spacer()
+                        Button { manager.thumbnailZoom = 1 } label: { SystemSymbolImage(name: "arrow.left.and.right") }
+                            .help(manager.language == .ru ? "По ширине панели" : "Fit panel width")
+                        Spacer()
+                        Button { manager.thumbnailZoom = min(1, manager.thumbnailZoom+0.1) } label: { SystemSymbolImage(name: "plus.magnifyingglass") }
+                            .disabled(manager.thumbnailZoom >= 1)
+                    }.buttonStyle(.plain).padding(.horizontal,10).help(manager.language == .ru ? "Размер миниатюр" : "Thumbnail size")
                     GeometryReader { geometry in
                         let available = max(44,geometry.size.width-16)
                         let target = 44+(available-44)*CGFloat(manager.thumbnailZoom)
@@ -1736,7 +1769,7 @@ private struct PanelBody: View {
                                         let ratio = rotated ? box.width/max(1,box.height) : box.height/max(1,box.width)
                                         Button { manager.navigate(to: index) } label: {
                                             VStack(spacing: 4) {
-                                                Image(nsImage: PDFThumbnailCache.shared.image(page: page,documentID: item.id,index: index,revision: manager.contentRevision,width: cell,ratio: ratio,interactive: manager.thumbnailGestureActive))
+                                                Image(nsImage: PDFThumbnailCache.shared.image(page: page,documentID: item.id,index: index,revision: manager.contentRevision,width: cell,ratio: ratio,interactive: manager.thumbnailGestureActive || panels.isResizing))
                                                     .resizable().aspectRatio(contentMode: .fit).frame(width: cell,height: cell*ratio)
                                                     .background(.white)
                                                     .overlay(Rectangle().stroke(manager.selected?.pageIndex == index ? Palette.accent : Palette.separator,lineWidth: 2))
@@ -1759,8 +1792,8 @@ private struct PanelBody: View {
                                 }
                             }.padding(8)
                         }
-                    }.background(ThumbnailGestureRegion(manager: manager))
-                }
+                    }
+                }.background(ThumbnailGestureRegion(manager: manager))
             } else { empty(manager.language == .ru ? "Откройте PDF" : "Open a PDF",symbol: "doc.text") }
         }
     }
@@ -3293,33 +3326,24 @@ private final class PDFViewerView: PDFView {
         guard window != nil else { return }
         overlay.clipsToBounds = true; overlay.pdfView = self; overlay.autoresizingMask = [.width, .height]
         addSubview(overlay, positioned: .above, relativeTo: nil); refreshOverlay()
-        eventMonitor = NSEvent.addLocalMonitorForEvents(matching: [.magnify, .scrollWheel, .leftMouseUp]) { [weak self] event in
-            var handled = false
+        HoverGestureRouter.shared.register(self)
+        eventMonitor = NSEvent.addLocalMonitorForEvents(matching: [.leftMouseUp]) { [weak self] event in
             MainActor.assumeIsolated {
-                if let self,let local = HoverEventLocation.point(for: event,in: self),self.document != nil {
-                    if self.visibleRect.contains(local) {
-                        if event.type == .leftMouseUp {
-                            if [.highlight,.underline,.strike].contains(self.activeTool) {
-                                DispatchQueue.main.async { [weak self] in self?.onMarkupFinished?() }
-                            }
-                        } else if event.type == .magnify {
-                            self.queueMagnification(event.magnification,at: local); handled = true
-                        } else if event.modifierFlags.contains(.command) || event.modifierFlags.contains(.control) {
-                            self.queueMagnification(-event.scrollingDeltaY * (event.hasPreciseScrollingDeltas ? 0.01 : 0.08),at: local); handled = true
-                        } else {
-                            if self.internalScrollView != nil { self.applyScroll(event); handled = true }
-                        }
-                    }
+                if let self, HoverEventLocation.point(for: event, in: self) != nil,
+                   [.highlight,.underline,.strike].contains(self.activeTool) {
+                    DispatchQueue.main.async { [weak self] in self?.onMarkupFinished?() }
                 }
             }
-            return handled ? nil : event
+            return event
         }
     }
     func stopEventMonitoring() {
+        HoverGestureRouter.shared.unregister(self)
         pendingZoom = 0; pendingZoomDocument = nil; zoomAnchor = nil; zoomScheduled = false
         if let eventMonitor { NSEvent.removeMonitor(eventMonitor) }; eventMonitor = nil
         if cursorPushed { NSCursor.pop(); cursorPushed = false }
     }
+
     override func updateTrackingAreas() {
         if let tracking { removeTrackingArea(tracking) }
         tracking = NSTrackingArea(rect: .zero, options: [.mouseMoved, .mouseEnteredAndExited, .activeAlways, .inVisibleRect], owner: self)
@@ -3645,7 +3669,7 @@ private final class PDFViewerView: PDFView {
         else { selectAnnotation(annotation) }
         setNeedsDisplay(bounds)
     }
-    private func applyScroll(_ event: NSEvent) {
+    fileprivate func applyScroll(_ event: NSEvent) {
         guard let scroll = internalScrollView else { return }
         let clip = scroll.contentView
         let factorX = event.hasPreciseScrollingDeltas ? 1 : max(10, scroll.horizontalLineScroll)
@@ -3675,7 +3699,7 @@ private final class PDFViewerView: PDFView {
         scroll.reflectScrolledClipView(clip)
         refreshOverlay(); onViewportChange?()
     }
-    private func queueMagnification(_ delta: CGFloat,at point: CGPoint) {
+    fileprivate func queueMagnification(_ delta: CGFloat,at point: CGPoint) {
         guard delta.isFinite,delta != 0,let document else { return }
         let identity = ObjectIdentifier(document)
         if pendingZoomDocument != identity { pendingZoom = 0; pendingZoomDocument = identity }
@@ -3741,9 +3765,15 @@ private final class PDFViewerView: PDFView {
         backgroundColor = NSColor(calibratedWhite: effectiveAppearance.bestMatch(from: [.darkAqua,.aqua]) == .darkAqua ? 0.12 : 0.82,alpha: 1)
     }
     override func viewDidEndLiveResize() { super.viewDidEndLiveResize(); onViewportChange?() }
+    private var resizeRefreshPending = false
     override func setFrameSize(_ size: NSSize) {
+        guard size != frame.size else { return }
         super.setFrameSize(size)
-        Task { @MainActor [weak self] in self?.onViewportChange?(); self?.refreshOverlay() }
+        guard !resizeRefreshPending else { return }; resizeRefreshPending = true
+        DispatchQueue.main.async { [weak self] in
+            guard let self else { return }; self.resizeRefreshPending = false
+            self.onViewportChange?(); self.refreshOverlay()
+        }
     }
 }
 
@@ -3933,7 +3963,7 @@ private extension PDFViewer.Coordinator {
     }
     func performFeature(_ id: String,on view: PDFViewerView,item: PDFDocumentItem) {
         guard finishSourceEditor() else { return }
-        let tools: [String:PDFTool] = ["cloud":.cloud,"pencil":.pencil,"eraser":.eraser,"sticky":.note,"note":.note,"addComment":.note,"stamp":.stamp,"addLink":.link,"marquee":.marquee,"textField":.formText,"checkbox":.formCheckbox,"radio":.formRadio,"dropdown":.formChoice,"button":.formButton]
+        let tools: [String:PDFTool] = ["cloud":.cloud,"pencil":.pencil,"eraser":.eraser,"sticky":.note,"note":.note,"addComment":.note,"addLink":.link,"marquee":.marquee,"textField":.formText,"checkbox":.formCheckbox,"radio":.formRadio,"dropdown":.formChoice,"button":.formButton]
         if let tool = tools[id] {
             if tool == .stamp { manager.annotationColor = .red; manager.annotationOpacity = 1 }
             if tool == .note { manager.annotationColor = .yellow; manager.annotationOpacity = 1 }
@@ -3942,6 +3972,7 @@ private extension PDFViewer.Coordinator {
         if ["bookmarkCase","bookmarkZoom","bookmarkActions","bookmarkSort","bookmarkMerge","bookmarkTOC","bookmarkSortPages","bookmarkLinks","swap","clear"].contains(id) { manager.recordUndo(item,group: id) }
         switch id {
         case "margins","background": showFormatting(id, item: item, view: view)
+        case "signature", "initials", "stamp": showGraphicMark(id, item: item, view: view)
         case "replace": replacePages(item: item,view: view)
         case "alignFields": alignFields(item: item,view: view)
         case "emailCurrent","emailAll": emailPDF(item: item,view: view,currentPage: id == "emailCurrent")
@@ -4512,7 +4543,6 @@ private struct ThumbnailGestureRegion: NSViewRepresentable {
 @MainActor
 private final class ThumbnailGestureView: NSView {
     weak var manager: DocumentManager?
-    private var monitor: Any?
     private var pendingValue: Double?
     private var scheduled = false
     private var detailWork: DispatchWorkItem?
@@ -4520,18 +4550,9 @@ private final class ThumbnailGestureView: NSView {
     override func hitTest(_ point: NSPoint) -> NSView? { nil }
     override func viewDidMoveToWindow() {
         super.viewDidMoveToWindow(); stop(); guard window != nil else { return }
-        monitor = NSEvent.addLocalMonitorForEvents(matching: [.magnify,.scrollWheel]) { [weak self] event in
-            var handled = false
-            MainActor.assumeIsolated {
-                guard let self,let point = HoverEventLocation.point(for: event,in: self),self.visibleRect.contains(point) else { return }
-                if event.type == .magnify { self.adjust(Double(event.magnification)); handled = true }
-                else if event.modifierFlags.contains(.control) || event.modifierFlags.contains(.command) {
-                    self.adjust(Double(-event.scrollingDeltaY)*(event.hasPreciseScrollingDeltas ? 0.01 : 0.12)); handled = true
-                }
-            }
-            return handled ? nil : event
-        }
+        HoverGestureRouter.shared.register(self)
     }
+
     func adjust(_ delta: Double) {
         guard delta.isFinite,let manager else { return }
         manager.thumbnailGestureOwner = gestureID
@@ -4554,8 +4575,8 @@ private final class ThumbnailGestureView: NSView {
     }
     static func zoom(_ value: Double,delta: Double) -> Double { min(1,max(0,value+delta*0.75)) }
     func stop() {
-        if let monitor { NSEvent.removeMonitor(monitor) }
-        monitor = nil; pendingValue = nil; scheduled = false
+        HoverGestureRouter.shared.unregister(self)
+        pendingValue = nil; scheduled = false
         detailWork?.cancel(); detailWork = nil
         let owner = gestureID
         DispatchQueue.main.async { [weak manager] in
@@ -4601,21 +4622,85 @@ private final class PDFThumbnailCache {
 }
 
 @MainActor
+private final class HoverGestureRouter {
+    static let shared = HoverGestureRouter()
+    private final class Entry { weak var view: NSView?; init(_ view: NSView) { self.view = view } }
+    private var entries: [Entry] = []
+    private var monitor: Any?
+    func register(_ view: NSView) {
+        entries.removeAll { $0.view == nil || $0.view === view }; entries.append(Entry(view))
+        guard monitor == nil else { return }
+        monitor = NSEvent.addLocalMonitorForEvents(matching: [.magnify, .scrollWheel]) { [weak self] event in
+            var handled = false
+            MainActor.assumeIsolated { handled = self?.route(event) ?? false }
+            return handled ? nil : event
+        }
+    }
+    func unregister(_ view: NSView) {
+        entries.removeAll { $0.view == nil || $0.view === view }
+        if entries.isEmpty, let monitor { NSEvent.removeMonitor(monitor); self.monitor = nil }
+    }
+    // Resolve each event independently; moving the pointer transfers ownership
+    // without changing first responder or requiring mouseDown.
+    func target(at screen: CGPoint, frontWindow: Int?) -> (NSView, CGPoint)? {
+        entries.removeAll { $0.view == nil }
+        for entry in entries.reversed() {
+            guard let view = entry.view, let point = HoverEventLocation.point(at: screen, in: view, frontWindow: frontWindow) else { continue }
+            return (view, point)
+        }
+        return nil
+    }
+    @discardableResult
+    func zoom(_ delta: CGFloat, at screen: CGPoint, frontWindow: Int?) -> Bool {
+        guard delta.isFinite, let (target, point) = target(at: screen, frontWindow: frontWindow) else { return false }
+        if let thumbnails = target as? ThumbnailGestureView, thumbnails.manager?.selected != nil {
+            thumbnails.adjust(Double(delta)); return true
+        }
+        if let pdf = target as? PDFViewerView, pdf.document != nil {
+            pdf.queueMagnification(delta, at: point); return true
+        }
+        return false
+    }
+    private func route(_ event: NSEvent) -> Bool {
+        let screen = NSEvent.mouseLocation
+        let number = NSWindow.windowNumber(at: screen, belowWindowWithWindowNumber: 0)
+        let front = number > 0 ? number : nil
+        let zooming = event.type == .magnify || event.modifierFlags.contains(.control) || event.modifierFlags.contains(.command)
+        if zooming {
+            let delta = event.type == .magnify ? event.magnification : -event.scrollingDeltaY * (event.hasPreciseScrollingDeltas ? 0.01 : 0.08)
+            return zoom(delta, at: screen, frontWindow: front)
+        }
+        if let (target, _) = target(at: screen, frontWindow: front), let pdf = target as? PDFViewerView,
+           pdf.document != nil, pdf.internalScrollView != nil { pdf.applyScroll(event); return true }
+        return false
+    }
+
+}
+
+@MainActor
 private enum HoverEventLocation {
-    static func acceptsWindow(owner: Int,underPointer: Int?,modal: Int?,hasSheet: Bool) -> Bool {
+    static func acceptsWindow(owner: Int, underPointer: Int?, modal: Int?, hasSheet: Bool) -> Bool {
         !hasSheet && (underPointer == nil || underPointer == owner) && (modal == nil || modal == owner)
     }
-    static func point(for event: NSEvent,in view: NSView) -> CGPoint? {
-        guard let window = view.window,window.isVisible,!view.isHiddenOrHasHiddenAncestor else { return nil }
-        // Gesture delivery follows the responder chain, which may still point
-        // at Search or a different pane. Route by the actual pointer instead.
+    static func point(for event: NSEvent, in view: NSView) -> CGPoint? {
         let screen = NSEvent.mouseLocation
-        guard window.frame.contains(screen) else { return nil }
-        // A gesture may still be addressed to the focused inspector/Search.
-        // The top visible window under the pointer owns it, not the key window.
-        let front = NSApp.orderedWindows.first { $0.isVisible && !$0.ignoresMouseEvents && $0.alphaValue > 0 && $0.frame.contains(screen) }
-        guard acceptsWindow(owner: window.windowNumber,underPointer: front?.windowNumber,modal: NSApp.modalWindow?.windowNumber,hasSheet: window.attachedSheet != nil) else { return nil }
-        return view.convert(window.convertPoint(fromScreen: screen),from: nil)
+        let front = NSWindow.windowNumber(at: screen, belowWindowWithWindowNumber: 0)
+        return point(at: screen, in: view, frontWindow: front > 0 ? front : nil)
+    }
+    static func point(at screen: CGPoint, in view: NSView, frontWindow: Int?) -> CGPoint? {
+        guard let window = view.window, window.isVisible, !view.isHiddenOrHasHiddenAncestor,
+              acceptsWindow(owner: window.windowNumber, underPointer: frontWindow, modal: NSApp.modalWindow?.windowNumber, hasSheet: window.attachedSheet != nil) else { return nil }
+        let inWindow = window.convertPoint(fromScreen: screen)
+        let local = view.convert(inWindow, from: nil)
+        // PDFKit's visibleRect may describe its scrolling document. Check the
+        // viewport bounds and ancestor clipping instead of relying on it.
+        guard view.bounds.contains(local) else { return nil }
+        var ancestor = view.superview
+        while let current = ancestor {
+            guard current.bounds.contains(current.convert(inWindow, from: nil)) else { return nil }
+            ancestor = current.superview
+        }
+        return local
     }
 }
 
@@ -5113,5 +5198,34 @@ private extension PDFViewer.Coordinator {
                 }
             }
         }
+    }
+}
+
+// MARK: Reusable graphic signatures, initials and stamps
+@MainActor
+private extension PDFViewer.Coordinator {
+    func showGraphicMark(_ kind: String, item: PDFDocumentItem, view: PDFViewerView) {
+        guard let page = view.currentPage, item.document.allowsDocumentChanges else { return }
+        let document = item.document, index = document.index(for: page)
+        let request = PDFGraphicMarkRequest(kind: kind, russian: manager.language == .ru, filename: item.filename, page: index) { [weak self, weak view] image in
+            guard let self, let view, self.manager.selected === item, item.document === document, view.document === document,
+                  let page = document.page(at: index), document.allowsDocumentChanges else {
+                return "Document changed. / Документ изменился."
+            }
+            let crop = page.bounds(for: .cropBox)
+            let width = min(240, crop.width*0.7), height = min(crop.height*0.7, width*CGFloat(image.height)/CGFloat(image.width))
+            let bounds = CGRect(x: crop.midX-width/2, y: crop.midY-height/2, width: width, height: height)
+            do {
+                let data = try PDFSourceSession.insertingImage(data: self.sourceData(item), pageIndex: index, image: image, bounds: bounds)
+                try self.installSourceData(data, item: item, index: index, view: view, bounds: nil)
+                self.manager.tool = .editContent
+                if let changedPage = item.document.page(at: index), let inserted = try self.contentSession(item: item, index: index).objects.last(where: { $0.kind == "image" }) {
+                    self.activateContent(inserted, page: changedPage, item: item, index: index, view: view)
+                }
+                self.manager.panels.select(.properties); self.refreshContentOutlines(view)
+                return nil
+            } catch { return error.localizedDescription }
+        }
+        DispatchQueue.main.async { [weak self] in self?.manager.graphicMarkRequest = request }
     }
 }
