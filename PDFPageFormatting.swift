@@ -305,11 +305,14 @@ private struct PDFFormattingPreview: NSViewRepresentable {
     }
 }
 
-@MainActor
 enum PDFFormattingGeometry {
     static func transform(_ page: PDFPage, box: PDFDisplayBox, target: CGRect) -> CGAffineTransform {
-        if let ref = page.pageRef { return ref.getDrawingTransform(box == .mediaBox ? .mediaBox : .cropBox, rect: target, rotate: 0, preserveAspectRatio: true) }
-        let source = page.bounds(for: box)
+        // Explicit scaling also handles enlargement. Quartz's drawing transform
+        // can keep a 1:1 page centered in a larger bitmap instead of upscaling.
+        let raw = page.pageRef?.getBoxRect(box == .mediaBox ? .mediaBox : .cropBox) ?? page.bounds(for: box)
+        let media = page.pageRef?.getBoxRect(.mediaBox) ?? page.bounds(for: .mediaBox)
+        let effective = box == .mediaBox ? raw : raw.intersection(media)
+        let source = effective.isNull || effective.isEmpty ? media : effective
         let rotation = CGAffineTransform(rotationAngle: -CGFloat(page.rotation) * .pi / 180)
         let local = CGAffineTransform(translationX: -source.minX, y: -source.minY).concatenating(rotation)
         let rotated = source.applying(local)
@@ -428,7 +431,7 @@ enum PDFImageExporter {
                 let target = CGRect(x: 0, y: 0, width: width, height: height)
                 context.clear(target)
                 if !options.transparent || options.format == .jpeg { context.setFillColor(NSColor.white.cgColor); context.fill(target) }
-                context.saveGState(); context.concatenate(ref.getDrawingTransform(.cropBox, rect: target, rotate: 0, preserveAspectRatio: true))
+                context.saveGState(); context.concatenate(PDFFormattingGeometry.transform(page,box: .cropBox,target: target))
                 NSGraphicsContext.saveGraphicsState(); NSGraphicsContext.current = graphics
                 context.drawPDFPage(ref)
                 for annotation in page.annotations where annotation.shouldDisplay && annotation.shouldPrint {

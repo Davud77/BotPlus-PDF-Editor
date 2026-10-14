@@ -181,3 +181,9 @@ Thumbnails default to panel width, with buttons and pinch/Ctrl/Command + wheel c
 Protect → Signatures/Initials supports typing, drawing and PNG/JPEG/TIFF import, opacity, borders and up to 20 local presets. Home → Stamp shares the editor with {date}/{file}/{page} tokens. Marks can be exported as transparent PNG, are inserted at the current page center and selected in the content editor for move/scale/rotation/deletion. These are graphic marks, not certificate/PKCS#7 signatures.
 
 The full preset library can be imported/exported as JSON. Import merges IDs and validates size/geometry, with no executable templates. Limits: 20 presets and a 16 MB library.
+
+### Update 1.6
+
+Organize → Extract / Split / Page Order supports ranges, page-count or top-level bookmark groups, reverse order ranges, direct internal links and Undo. Independent export workers support cancellation/progress and protect the original file. Output does not inherit the source encryption.
+
+View → Snapshot copies a region as PNG at 72–600 DPI (Properties). Previous/Next View and top arrows restore each document’s page, zoom, center and display mode. Session history holds up to 150 views and clears after structural changes or Undo. Search runs on Enter; high-DPI raster enlargement is corrected.

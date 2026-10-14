@@ -1042,6 +1042,7 @@ private func checkFormatting(root: URL) async throws {
     try checkZoomSafety()
     try checkHoverRoutingAndSplitter()
     try checkGraphicMarks(root: root)
+    try await checkDocumentWorkflows(root: root)
     print("PASS: decoration templates/ranges/replacement/persistence, margins validation, vector background ordering/update/removal, PNG/JPEG/TIFF export and rotation")
 }
 
@@ -1172,4 +1173,100 @@ private func checkGraphicMarks(root: URL) throws {
     let session = try PDFContentSession(data: changed,pageIndex: 0)
     expect(session.objects.contains { $0.kind == "image" && abs($0.bounds.width-240) < 1 }, "saved graphic mark is selectable content")
     print("PASS: typed/drawn/imported transparent signatures, dynamic stamps, preset serialization and PDF save/reopen")
+}
+
+@MainActor
+private func checkDocumentWorkflows(root: URL) async throws {
+    func expect(_ value: @autoclosure () -> Bool, _ message: String) { if !value() { fatalError("WORKFLOW CHECK FAILED: \(message)") } }
+    expect(PDFPagePlan.order("3-1, 4",count: 4) == [2,1,0,3], "descending order parser")
+    expect(PDFPagePlan.order("1,1",count: 4) == nil && PDFPagePlan.order("0",count: 4) == nil, "duplicate/invalid page order rejected")
+    expect(PDFPagePlan.groups(indices: [0,1,2,3,4],size: 2,starts: nil) == [[0,1],[2,3],[4]], "split by page count")
+    expect(PDFPagePlan.groups(indices: [0,1,2,3,4],size: 1,starts: [0,3]) == [[0,1,2],[3,4]], "split at top-level bookmarks")
+    let document = PDFDocument()
+    for label in ["ONE","TWO","THREE"] { document.insert(PDFRasterizer.textPage(label)!,at: document.pageCount) }
+    let pages = (0..<3).map { document.page(at: $0)! }
+    let link = PDFAnnotation(bounds: CGRect(x: 20,y: 20,width: 100,height: 20),forType: .link,withProperties: nil)
+    link.action = PDFActionGoTo(destination: PDFDestination(page: pages[2],at: CGPoint(x: 30,y: 600))); pages[1].addAnnotation(link)
+    let outside = PDFAnnotation(bounds: CGRect(x: 20,y: 50,width: 100,height: 20),forType: .link,withProperties: nil)
+    outside.action = PDFActionGoTo(destination: PDFDestination(page: pages[0],at: .zero)); pages[1].addAnnotation(outside)
+    let url = PDFAnnotation(bounds: CGRect(x: 20,y: 80,width: 100,height: 20),forType: .link,withProperties: nil)
+    url.action = PDFActionURL(url: URL(string: "https://botplus.ru")!); pages[1].addAnnotation(url)
+    let rootOutline = PDFOutline(), parent = PDFOutline(), child = PDFOutline()
+    parent.label = "Section"; parent.destination = PDFDestination(page: pages[1],at: .zero)
+    child.label = "Child"; child.destination = PDFDestination(page: pages[2],at: .zero)
+    parent.insertChild(child,at: 0); rootOutline.insertChild(parent,at: 0)
+    let omitted = PDFOutline(); omitted.label = "Omitted"; omitted.destination = PDFDestination(page: pages[0],at: .zero); rootOutline.insertChild(omitted,at: 1)
+    document.outlineRoot = rootOutline
+    let mark = PDFAnnotation(bounds: CGRect(x: 10,y: 10,width: 60,height: 20),forType: .square,withProperties: nil)
+    AnnotationMetadata.setGroup("kept-group",on: mark); AnnotationMetadata.setOpacity(0.5,on: mark); pages[2].addAnnotation(mark)
+    AnnotationMetadata.prepareForSave(document)
+    let subset = try PDFSubsetBuilder.build(document,indices: [1,2])
+    let exported = PDFDocument(data: subset)!; AnnotationMetadata.restore(exported)
+    expect(exported.pageCount == 2 && exported.page(at: 0)!.string!.contains("TWO"), "subset page order and text preserved")
+    let exportedLinks = exported.page(at: 0)!.annotations.filter { $0.type == "Link" }
+    expect(exportedLinks.compactMap { $0.action as? PDFActionGoTo }.allSatisfy { exported.index(for: $0.destination.page!) == 1 }, "subset internal links remapped")
+    expect(exportedLinks.filter { $0.action == nil }.count == 1, "out-of-range destination removed")
+    expect(exportedLinks.contains { $0.action is PDFActionURL }, "external link preserved")
+    expect(exported.outlineRoot?.numberOfChildren == 1 && exported.outlineRoot?.child(at: 0)?.numberOfChildren == 1, "bookmark hierarchy pruned without flattening")
+    expect(exported.page(at: 1)!.annotations.contains { AnnotationMetadata.group(of: $0) == "kept-group" }, "annotation metadata survives extraction")
+    let splitFolder = root.appendingPathComponent("workflow-split")
+    let splitData = document.dataRepresentation()!
+    let exportWorker = Task.detached { try PDFSubsetBuilder.export(data: splitData,groups: [[0,1],[2]],to: splitFolder,split: true,progress: { _ in }) }
+    let files = try await exportWorker.value
+    expect(files == 2 && PDFDocument(url: splitFolder.appendingPathComponent("Part-001.pdf"))?.pageCount == 2, "split writes correct PDF groups")
+    let protectedFolder = root.appendingPathComponent("existing-split"); try FileManager.default.createDirectory(at: protectedFolder,withIntermediateDirectories: false)
+    let sentinel = protectedFolder.appendingPathComponent("keep.txt"); try Data("KEEP".utf8).write(to: sentinel)
+    do { _ = try PDFSubsetBuilder.export(data: document.dataRepresentation()!,groups: [[0]],to: protectedFolder,split: true,progress: { _ in }); fatalError("Existing folder overwritten") } catch { }
+    expect(FileManager.default.fileExists(atPath: sentinel.path), "existing folder never removed on export failure")
+    let initial = root.appendingPathComponent("workflow-source.pdf"); try document.dataRepresentation()!.write(to: initial)
+    let manager = DocumentManager(); manager.open(initial); let item = manager.selected!
+    let view = PDFViewerView(frame: CGRect(x: 0,y: 0,width: 600,height: 500))
+    let window = NSWindow(contentRect: view.frame,styleMask: [.titled],backing: .buffered,defer: false); window.isReleasedWhenClosed = false; window.contentView = view
+    let coordinator = PDFViewer.Coordinator(manager: manager); coordinator.attach(view); coordinator.update(view)
+    coordinator.checkCommand(.feature("swap"),view: view)
+    for _ in 0..<30 { if manager.pageWorkflowRequest != nil { break }; try await Task.sleep(for: .milliseconds(10)) }
+    let request = manager.pageWorkflowRequest!
+    var options = PDFPageWorkflowOptions(); options.range = "3,1,2"
+    expect(request.apply(options) == nil, "page order dialog applies validated permutation")
+    manager.pageWorkflowRequest = nil
+    expect(item.document.page(at: 0)!.string!.contains("THREE") && item.document.page(at: 1)!.string!.contains("ONE"), "permutation reorders all pages")
+    let orderedData = try manager.serializedData(item), ordered = PDFDocument(data: orderedData)!
+    expect(ordered.outlineRoot?.child(at: 0)?.destination?.page.map { ordered.index(for: $0) } == 2, "reordered bookmarks follow original page")
+    expect(ordered.page(at: 2)?.annotations.compactMap { $0.action as? PDFActionGoTo }.contains { $0.destination.page.map { ordered.index(for: $0) } == 0 } == true, "reordered links follow original target")
+    manager.undoDocument(redo: false); coordinator.update(view)
+    expect(item.document.page(at: 0)!.string!.contains("ONE"), "page order Undo restores original")
+    coordinator.checkCommand(.page(0),view: view); view.scaleFactor = 1.2; coordinator.checkCommand(.page(0),view: view)
+    let a = coordinator.navigationLocation(view,item: item)!
+    view.scaleFactor = 1.8; coordinator.checkCommand(.page(2),view: view)
+    let b = coordinator.navigationLocation(view,item: item)!
+    coordinator.navigationWork?.cancel(); item.navigation.reset(); item.navigationPageCount = item.pageCount
+    item.navigation.record(a); item.navigation.record(b)
+    let serializations = manager.serializationCount
+    coordinator.checkCommand(.history(-1),view: view); try await Task.sleep(for: .milliseconds(80))
+    expect(item.pageIndex == a.page && abs(view.scaleFactor-a.zoom) < 0.001, "history restores page and zoom")
+    let actual = coordinator.navigationLocation(view,item: item)!
+    expect(hypot(actual.point.x-a.point.x,actual.point.y-a.point.y) < 2, "history restores viewport center")
+    expect(item.navigation.canForward, "history preserves forward branch")
+    coordinator.checkCommand(.history(1),view: view); try await Task.sleep(for: .milliseconds(80))
+    expect(item.pageIndex == b.page && abs(view.scaleFactor-b.zoom) < 0.001, "history forward restores saved view")
+    expect(manager.serializationCount == serializations, "history never serializes the PDF")
+    let history = PDFNavigationHistory(); history.record(a); history.record(b); _ = history.move(-1)
+    history.record(.init(page: 1,point: CGPoint(x: 10,y: 50),zoom: 1,layout: .single,padding: NSEdgeInsets(top: 8,left: 8,bottom: 8,right: 8)))
+    expect(!history.canForward && history.canBack, "new view clears obsolete forward branch")
+    let region = CGRect(x: 20,y: 100,width: 120,height: 80)
+    let source = item.document
+    for angle in [0,90,180,270] {
+        source.page(at: 0)!.rotation = angle
+        let data = try manager.serializedData(item)
+        let snapshotWorker = Task.detached { try PDFSnapshotRenderer.render(data: data,index: 0,region: region,dpi: 144) }
+        let png = try await snapshotWorker.value
+        let image = NSBitmapImageRep(data: png)!
+        expect(image.pixelsWide == (angle%180 == 0 ? 240 : 160) && image.pixelsHigh == (angle%180 == 0 ? 160 : 240), "snapshot DPI and rotation dimensions")
+    }
+    view.activeTool = .snapshot; var captured = false; view.onSnapshot = { _, rect in captured = rect.width > 0 }
+    let revision = manager.contentRevision, annotations = source.page(at: 0)!.annotations.count
+    view.checkDraw(page: source.page(at: 0)!,start: CGPoint(x: 20,y: 100),end: CGPoint(x: 140,y: 180),tool: .snapshot)
+    expect(captured && manager.contentRevision == revision && source.page(at: 0)!.annotations.count == annotations, "snapshot tool creates no annotation or content revision")
+    coordinator.detach(); view.stopEventMonitoring(); window.orderOut(nil)
+    print("PASS: ordered page plans, split groups, extraction links/bookmarks/metadata, reorder/Undo, page/zoom/position history without serialization, rotated DPI snapshots and transient tool safety")
 }
